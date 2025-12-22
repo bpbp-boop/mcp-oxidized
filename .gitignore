@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target
+*.pdb
+
+# Environment configuration (secrets)
+.env
+.env.local
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.profraw
+
+# BMAD workflow artifacts (development only)
+_bmad/
+_bmad-output/
+
+# Claude Code
+.claude/
