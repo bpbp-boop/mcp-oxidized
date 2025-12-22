@@ -1,4 +1,5 @@
 mod config;
+pub mod error;
 
 use config::Config;
 use rmcp::{ServerHandler, ServiceExt, model::ServerInfo};
