@@ -2,6 +2,7 @@
 name = "mcp-oxidized"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/fxthiry/mcp-oxidized"
 
 [dependencies]
 moka = { version = "0.12.12", features = ["future"] }
@@ -17,3 +18,8 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 [dev-dependencies]
 serial_test = "3.2.0"
 tempfile = "3.23.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
