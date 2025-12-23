@@ -503,6 +503,26 @@ pub trait OxidizedBackend: Send + Sync {
     ///
     /// - [`OxidizedError::ApiUnreachable`] - Network/connection error
     async fn reload_sources(&self) -> Result<(), OxidizedError>;
+
+    /// Search for nodes whose configs contain the given pattern (server-side pre-filter).
+    ///
+    /// Uses Oxidized's `/nodes/conf_search` endpoint which returns HTML.
+    /// Returns node names that have at least one match, enabling optimization
+    /// by avoiding fetching configs that won't match.
+    ///
+    /// # Graceful Degradation
+    ///
+    /// Returns `Ok(vec![])` on any error (network, parsing, 404) to allow
+    /// fallback to full client-side search. Errors are logged at debug level.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - The search pattern to find in configurations
+    ///
+    /// # Returns
+    ///
+    /// A list of node names whose configurations contain the pattern.
+    async fn conf_search(&self, pattern: &str) -> Result<Vec<String>, OxidizedError>;
 }
 
 // ============================================================================
@@ -806,6 +826,56 @@ impl OxidizedClient {
         Ok(())
     }
 
+    /// Build an authenticated POST request to the given endpoint.
+    fn build_post_request(&self, endpoint: &str) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut request = self.client.post(&url);
+
+        if let Some(auth) = &self.auth {
+            request = request.basic_auth(&auth.username, Some(&auth.password));
+        }
+
+        request
+    }
+
+    /// Parse HTML response from `/nodes/conf_search` endpoint.
+    ///
+    /// Extracts node names from the first `<td>` in each table row.
+    /// Filters out non-node values (entries containing "group", empty strings).
+    ///
+    /// # Arguments
+    ///
+    /// * `html` - The HTML response body
+    ///
+    /// # Returns
+    ///
+    /// A list of unique node names found in the response.
+    pub fn parse_conf_search_html(html: &str) -> Vec<String> {
+        // Regex to extract first <td> content in each row: <td>NODE_NAME</td>
+        let re = regex::Regex::new(r"<td>([^<]+)</td>").expect("Valid regex");
+
+        let mut nodes: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for cap in re.captures_iter(html) {
+            if let Some(node_match) = cap.get(1) {
+                let node = node_match.as_str().trim();
+
+                // Filter out non-node values
+                if node.is_empty() || node.to_lowercase().contains("group") {
+                    continue;
+                }
+
+                // Deduplicate (same node might appear multiple times in results)
+                if seen.insert(node.to_string()) {
+                    nodes.push(node.to_string());
+                }
+            }
+        }
+
+        nodes
+    }
+
     /// Check if response body contains Oxidized 0.35.0 NodeNotFound pattern.
     ///
     /// Oxidized 0.35.0 returns HTTP 500 with different formats depending on the Accept header:
@@ -1085,6 +1155,62 @@ impl OxidizedBackend for OxidizedClient {
         }
 
         result
+    }
+
+    #[instrument(skip(self), fields(url = %self.base_url))]
+    async fn conf_search(&self, pattern: &str) -> Result<Vec<String>, OxidizedError> {
+        // Early return for empty pattern - no point in network request
+        if pattern.is_empty() {
+            tracing::debug!("Empty pattern, skipping conf_search");
+            return Ok(vec![]);
+        }
+
+        // NOTE: No execute_with_retry() here by design.
+        // conf_search is an optimization layer with graceful degradation.
+        // If it fails, search_configs falls back to searching all nodes.
+        // Retrying would add latency without benefit since fallback works.
+
+        // POST /nodes/conf_search with form data
+        let response = self
+            .build_post_request("/nodes/conf_search")
+            .form(&[("search_in_conf_textbox", pattern)])
+            .send()
+            .await;
+
+        // Graceful degradation: return empty vec on any error
+        let body = match response {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    tracing::debug!(
+                        status = %resp.status(),
+                        "conf_search API returned non-success status, falling back"
+                    );
+                    return Ok(vec![]);
+                }
+                match resp.text().await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Failed to read conf_search response body");
+                        return Ok(vec![]);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "conf_search API unavailable, falling back");
+                return Ok(vec![]);
+            }
+        };
+
+        // Parse HTML response
+        let nodes = Self::parse_conf_search_html(&body);
+
+        tracing::debug!(
+            pattern = %pattern,
+            nodes_found = nodes.len(),
+            "conf_search completed"
+        );
+
+        Ok(nodes)
     }
 }
 
@@ -2214,6 +2340,182 @@ mod tests {
         assert!(
             client.stats_cache.get(&()).await.is_none(),
             "stats_cache should be invalidated"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_conf_search_html Tests (Story 2-3)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_conf_search_html_real_oxidized_response() {
+        // Sample HTML from real Oxidized /nodes/conf_search response
+        let html = r#"
+<table class='table' id='versionsTable'>
+  <tbody>
+    <tr>
+      <td>PDC-SW-ETG2-B</td>
+      <td><a href='/node/fetch/PDC-SW-ETG2-B'><i class='bi bi-cloud-download'></i></a></td>
+    </tr>
+    <tr>
+      <td>SW-Core-01</td>
+      <td><a href='/node/fetch/SW-Core-01'><i class='bi bi-cloud-download'></i></a></td>
+    </tr>
+    <tr>
+      <td>RTR-Edge-02</td>
+      <td><a href='/node/fetch/RTR-Edge-02'><i class='bi bi-cloud-download'></i></a></td>
+    </tr>
+  </tbody>
+</table>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.contains(&"PDC-SW-ETG2-B".to_string()));
+        assert!(nodes.contains(&"SW-Core-01".to_string()));
+        assert!(nodes.contains(&"RTR-Edge-02".to_string()));
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_empty_table() {
+        let html = r#"
+<table class='table' id='versionsTable'>
+  <tbody>
+  </tbody>
+</table>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert!(nodes.is_empty(), "Empty table should return empty list");
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_malformed_html() {
+        // Malformed HTML without proper structure
+        let html = "<html><body>No table here</body></html>";
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert!(nodes.is_empty(), "Malformed HTML should return empty list");
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_filters_group_entries() {
+        // HTML with group entries that should be filtered out
+        // (entries containing "group" in any case are filtered)
+        let html = r#"
+<table>
+  <tr><td>my-group</td></tr>
+  <tr><td>SW-Core-01</td></tr>
+  <tr><td>group-routers</td></tr>
+  <tr><td>RTR-Edge-01</td></tr>
+</table>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.contains(&"SW-Core-01".to_string()));
+        assert!(nodes.contains(&"RTR-Edge-01".to_string()));
+        // "my-group" and "group-routers" should be filtered out
+        assert!(!nodes.iter().any(|n| n.to_lowercase().contains("group")));
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_filters_empty_strings() {
+        let html = r#"
+<table>
+  <tr><td></td></tr>
+  <tr><td>  </td></tr>
+  <tr><td>SW-Core-01</td></tr>
+</table>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0], "SW-Core-01");
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_deduplicates() {
+        // Same node appearing multiple times (can happen in search results)
+        let html = r#"
+<table>
+  <tr><td>SW-Core-01</td></tr>
+  <tr><td>RTR-Edge-01</td></tr>
+  <tr><td>SW-Core-01</td></tr>
+  <tr><td>SW-Core-01</td></tr>
+</table>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert_eq!(nodes.len(), 2, "Should deduplicate nodes");
+        assert!(nodes.contains(&"SW-Core-01".to_string()));
+        assert!(nodes.contains(&"RTR-Edge-01".to_string()));
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_trims_whitespace() {
+        let html = r#"
+<table>
+  <tr><td>  SW-Core-01  </td></tr>
+  <tr><td>
+    RTR-Edge-01
+  </td></tr>
+</table>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(
+            nodes.contains(&"SW-Core-01".to_string()),
+            "Should trim leading/trailing whitespace"
+        );
+        assert!(
+            nodes.contains(&"RTR-Edge-01".to_string()),
+            "Should trim newlines and whitespace"
+        );
+    }
+
+    #[test]
+    fn test_parse_conf_search_html_no_matches() {
+        // Valid table structure but pattern matches nothing
+        let html = r#"
+<div class="alert alert-info">
+  No results found for pattern 'nonexistent'
+</div>
+"#;
+
+        let nodes = OxidizedClient::parse_conf_search_html(html);
+
+        assert!(nodes.is_empty(), "No matches should return empty list");
+    }
+
+    // -------------------------------------------------------------------------
+    // conf_search Edge Case Tests (Story 2-3)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_conf_search_empty_pattern_returns_empty() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+        };
+        let client = OxidizedClient::new(&config);
+
+        // Empty pattern should return empty vec without network call
+        let result = client.conf_search("").await;
+
+        assert!(result.is_ok(), "Empty pattern should not error");
+        assert!(
+            result.unwrap().is_empty(),
+            "Empty pattern should return empty list"
         );
     }
 }

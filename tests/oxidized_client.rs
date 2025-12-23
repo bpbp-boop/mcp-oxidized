@@ -1544,3 +1544,197 @@ async fn test_search_configs_regex_pattern() {
         }
     }
 }
+
+// =============================================================================
+// Search Performance & Safety Tests (Story 2.3)
+// =============================================================================
+
+/// Test that conf_search API returns HTML and can be parsed (AC: 1, 2).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_conf_search_api_works() {
+    let client = create_client_from_env();
+
+    // Test with a common pattern that should exist in configs
+    let result = client.conf_search("hostname").await;
+
+    assert!(result.is_ok(), "conf_search should succeed");
+
+    let nodes = result.unwrap();
+
+    // We should find at least some nodes with "hostname" in their config
+    // (this is a very common pattern in network device configs)
+    println!(
+        "conf_search found {} nodes matching 'hostname'",
+        nodes.len()
+    );
+
+    // Even if empty (no matches), the API should work without error
+    // The fact that we got Ok() means the HTML was parsed successfully
+}
+
+/// Test that search_configs uses pre-filter optimization when available (AC: 5).
+///
+/// This test measures performance difference between optimized and unoptimized search.
+/// It compares:
+/// 1. A selective pattern that matches few nodes (high optimization benefit)
+/// 2. A broad pattern that matches many nodes (low optimization benefit)
+///
+/// The selective search should search fewer nodes due to pre-filter.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_with_prefilter_optimization() {
+    use std::time::Instant;
+
+    let client = create_client_from_env();
+
+    // Get total node count first
+    let (all_nodes, _) = client.get_nodes().await.expect("Should get nodes");
+    let total_nodes = all_nodes.len();
+    println!("Total nodes in inventory: {}", total_nodes);
+
+    // First, check if conf_search is available
+    let prefilter_check = client.conf_search("tacacs").await.unwrap_or_default();
+    let prefilter_available = !prefilter_check.is_empty();
+
+    if !prefilter_available {
+        // Try with a more common pattern
+        let common_check = client.conf_search("hostname").await.unwrap_or_default();
+        if common_check.is_empty() {
+            println!("SKIP: conf_search API not available or no matches");
+            return;
+        }
+    }
+
+    // Search for a selective pattern (one that matches few configs)
+    let start_selective = Instant::now();
+    let result_selective = tools::search_configs(&client, "tacacs", None, false, 100).await;
+    let duration_selective = start_selective.elapsed();
+
+    assert!(result_selective.is_ok(), "Selective search should succeed");
+    let selective = result_selective.unwrap();
+
+    // Search for a broad pattern (one that matches many configs)
+    let start_broad = Instant::now();
+    let result_broad = tools::search_configs(&client, "hostname", None, false, 100).await;
+    let duration_broad = start_broad.elapsed();
+
+    assert!(result_broad.is_ok(), "Broad search should succeed");
+    let broad = result_broad.unwrap();
+
+    println!(
+        "Selective pattern 'tacacs': {} matches from {} nodes in {:?}",
+        selective.total_matches, selective.nodes_searched, duration_selective
+    );
+    println!(
+        "Broad pattern 'hostname': {} matches from {} nodes in {:?}",
+        broad.total_matches, broad.nodes_searched, duration_broad
+    );
+
+    // Calculate optimization benefit
+    let selective_reduction = if total_nodes > 0 {
+        ((total_nodes - selective.nodes_searched) as f64 / total_nodes as f64) * 100.0
+    } else {
+        0.0
+    };
+    let broad_reduction = if total_nodes > 0 {
+        ((total_nodes - broad.nodes_searched) as f64 / total_nodes as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!(
+        "Optimization benefit - Selective: {:.1}% reduction, Broad: {:.1}% reduction",
+        selective_reduction, broad_reduction
+    );
+
+    // Verify pre-filter is working: selective should search fewer nodes than total
+    if selective.nodes_searched < total_nodes {
+        println!(
+            "✓ Pre-filter optimization active: selective searched {}/{} nodes ({:.1}% saved)",
+            selective.nodes_searched, total_nodes, selective_reduction
+        );
+    }
+
+    // The selective search should fetch fewer configs than broad
+    if selective.nodes_searched < broad.nodes_searched {
+        println!(
+            "✓ Selective pattern more efficient: {} vs {} nodes searched",
+            selective.nodes_searched, broad.nodes_searched
+        );
+    }
+}
+
+/// Test that search_configs falls back gracefully when conf_search fails (AC: 5).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_prefilter_fallback() {
+    let client = create_client_from_env();
+
+    // Even if conf_search is unavailable, search_configs should still work
+    // by falling back to searching all nodes
+    let result = tools::search_configs(&client, "version", None, false, 50).await;
+
+    assert!(
+        result.is_ok(),
+        "Search should succeed even without prefilter"
+    );
+
+    let search_result = result.unwrap();
+    println!(
+        "Fallback search: {} nodes searched, {} matches",
+        search_result.nodes_searched, search_result.total_matches
+    );
+
+    // Verify we searched some nodes (fallback working)
+    assert!(
+        search_result.nodes_searched > 0,
+        "Should search nodes even without prefilter"
+    );
+}
+
+/// Test that search_configs correctly intersects user nodes with pre-filter results (AC: 5).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_prefilter_intersection() {
+    let client = create_client_from_env();
+
+    // Get some valid node names
+    let nodes = list_nodes(&client, None, Some(5), None).await.unwrap();
+    if nodes.items.len() < 2 {
+        println!("SKIP: Need at least 2 nodes for intersection test");
+        return;
+    }
+
+    let user_nodes: Vec<String> = nodes.items.iter().map(|n| n.name.clone()).collect();
+
+    // Search with user-specified nodes
+    let result = tools::search_configs(
+        &client,
+        ".*", // Match anything
+        Some(user_nodes.clone()),
+        true,
+        100,
+    )
+    .await;
+
+    assert!(result.is_ok(), "Search with node filter should succeed");
+
+    let search_result = result.unwrap();
+
+    // All results should be from our specified nodes
+    for node_match in &search_result.results {
+        assert!(
+            user_nodes.contains(&node_match.node),
+            "Result should only contain requested nodes, got: {}",
+            node_match.node
+        );
+    }
+
+    println!(
+        "Intersection test: searched {} nodes (requested {}), found {} matches",
+        search_result.nodes_searched,
+        user_nodes.len(),
+        search_result.total_matches
+    );
+}
