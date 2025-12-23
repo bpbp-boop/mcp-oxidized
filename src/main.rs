@@ -18,9 +18,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// MCP server implementation for Oxidized network device backup system.
 ///
-/// Provides resources for node discovery and statistics:
+/// Provides resources for node discovery, configuration access, and statistics:
 /// - `oxidized://nodes` - List all nodes (paginated)
 /// - `oxidized://node/{name}` - Get specific node details
+/// - `oxidized://node/{name}/config` - Get current configuration (FR5)
+/// - `oxidized://node/{name}/versions` - Get version history (FR6)
+/// - `oxidized://node/{name}/versions/{oid}` - Get specific version config (FR7)
 /// - `oxidized://stats` - Global statistics
 #[derive(Clone)]
 struct OxidizedServer {
@@ -135,19 +138,60 @@ impl ServerHandler for OxidizedServer {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_ {
         async move {
-            let templates = vec![Annotated::new(
-                RawResourceTemplate {
-                    uri_template: "oxidized://node/{name}".to_string(),
-                    name: "node".to_string(),
-                    title: Some("Node Details".to_string()),
-                    description: Some(
-                        "Get detailed information about a specific network device by name"
-                            .to_string(),
-                    ),
-                    mime_type: Some("application/json".to_string()),
-                },
-                None,
-            )];
+            let templates = vec![
+                Annotated::new(
+                    RawResourceTemplate {
+                        uri_template: "oxidized://node/{name}".to_string(),
+                        name: "node".to_string(),
+                        title: Some("Node Details".to_string()),
+                        description: Some(
+                            "Get detailed information about a specific network device by name"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                    },
+                    None,
+                ),
+                Annotated::new(
+                    RawResourceTemplate {
+                        uri_template: "oxidized://node/{name}/config".to_string(),
+                        name: "node_config".to_string(),
+                        title: Some("Node Configuration".to_string()),
+                        description: Some(
+                            "Get the current configuration of a network device with size metadata"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                    },
+                    None,
+                ),
+                Annotated::new(
+                    RawResourceTemplate {
+                        uri_template: "oxidized://node/{name}/versions".to_string(),
+                        name: "node_versions".to_string(),
+                        title: Some("Configuration Versions".to_string()),
+                        description: Some(
+                            "List all available configuration versions for a node, sorted newest first"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                    },
+                    None,
+                ),
+                Annotated::new(
+                    RawResourceTemplate {
+                        uri_template: "oxidized://node/{name}/versions/{oid}".to_string(),
+                        name: "node_version".to_string(),
+                        title: Some("Historical Configuration".to_string()),
+                        description: Some(
+                            "Get configuration at a specific version by Git commit OID"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                    },
+                    None,
+                ),
+            ];
 
             Ok(ListResourceTemplatesResult {
                 resource_templates: templates,
@@ -213,28 +257,133 @@ impl ServerHandler for OxidizedServer {
                         meta: None,
                     }],
                 })
-            } else if let Some(node_name) = uri.strip_prefix("oxidized://node/") {
-                // Get specific node
-                let result = resources::get_node(&*client, node_name)
-                    .await
-                    .map_err(Self::to_mcp_error)?;
+            } else if let Some(path) = uri.strip_prefix("oxidized://node/") {
+                // Parse node resource paths:
+                // - {name} -> node details
+                // - {name}/config -> node configuration
+                // - {name}/versions -> version list
+                // - {name}/versions/{oid} -> specific version
 
-                let json = serde_json::to_string_pretty(&result).map_err(|e| {
-                    McpError::new(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to serialize node: {}", e),
+                if let Some(rest) = path.strip_suffix("/config") {
+                    // oxidized://node/{name}/config - Get node configuration
+                    let node_name = rest;
+                    let result = resources::get_node_config(&*client, node_name)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to serialize config: {}", e),
+                            None,
+                        )
+                    })?;
+
+                    Ok(ReadResourceResult {
+                        contents: vec![ResourceContents::TextResourceContents {
+                            uri: uri.clone(),
+                            mime_type: Some("application/json".to_string()),
+                            text: json,
+                            meta: None,
+                        }],
+                    })
+                } else if path.contains("/versions/") {
+                    // oxidized://node/{name}/versions/{oid} - Get specific version
+                    let parts: Vec<&str> = path.splitn(3, '/').collect();
+                    if parts.len() == 3 && parts[1] == "versions" {
+                        let node_name = parts[0];
+                        let oid = parts[2];
+                        let result = resources::get_node_version(&*client, node_name, oid)
+                            .await
+                            .map_err(Self::to_mcp_error)?;
+
+                        let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                            McpError::new(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("Failed to serialize version config: {}", e),
+                                None,
+                            )
+                        })?;
+
+                        Ok(ReadResourceResult {
+                            contents: vec![ResourceContents::TextResourceContents {
+                                uri: uri.clone(),
+                                mime_type: Some("application/json".to_string()),
+                                text: json,
+                                meta: None,
+                            }],
+                        })
+                    } else {
+                        Err(McpError::new(
+                            ErrorCode::INVALID_PARAMS,
+                            format!(
+                                "[Error] Invalid version path: '{}'\n\
+                                 [Context] Expected format: oxidized://node/{{name}}/versions/{{oid}}\n\
+                                 [Next Step] Provide both node name and version OID.",
+                                uri
+                            ),
+                            None,
+                        ))
+                    }
+                } else if let Some(node_name) = path.strip_suffix("/versions") {
+                    // oxidized://node/{name}/versions - Get version list
+                    let result = resources::get_node_versions(&*client, node_name)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to serialize versions: {}", e),
+                            None,
+                        )
+                    })?;
+
+                    Ok(ReadResourceResult {
+                        contents: vec![ResourceContents::TextResourceContents {
+                            uri: uri.clone(),
+                            mime_type: Some("application/json".to_string()),
+                            text: json,
+                            meta: None,
+                        }],
+                    })
+                } else if !path.contains('/') {
+                    // oxidized://node/{name} - Get node details (no slashes in name)
+                    let node_name = path;
+                    let result = resources::get_node(&*client, node_name)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to serialize node: {}", e),
+                            None,
+                        )
+                    })?;
+
+                    Ok(ReadResourceResult {
+                        contents: vec![ResourceContents::TextResourceContents {
+                            uri: uri.clone(),
+                            mime_type: Some("application/json".to_string()),
+                            text: json,
+                            meta: None,
+                        }],
+                    })
+                } else {
+                    // Unknown subpath
+                    Err(McpError::new(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "[Error] Unknown node resource path: '{}'\n\
+                             [Context] Attempted to read an unsupported node subresource.\n\
+                             [Suggestions] Valid paths: /config, /versions, /versions/{{oid}}\n\
+                             [Next Step] Use oxidized://node/{{name}}/config, /versions, or /versions/{{oid}}.",
+                            uri
+                        ),
                         None,
-                    )
-                })?;
-
-                Ok(ReadResourceResult {
-                    contents: vec![ResourceContents::TextResourceContents {
-                        uri: uri.clone(),
-                        mime_type: Some("application/json".to_string()),
-                        text: json,
-                        meta: None,
-                    }],
-                })
+                    ))
+                }
             } else {
                 // Unknown resource URI
                 Err(McpError::new(
@@ -242,7 +391,7 @@ impl ServerHandler for OxidizedServer {
                     format!(
                         "[Error] Unknown resource URI: '{}'\n\
                          [Context] Attempted to read a resource that does not exist.\n\
-                         [Suggestions] Available resources: oxidized://nodes, oxidized://stats, oxidized://node/{{name}}\n\
+                         [Suggestions] Available resources: oxidized://nodes, oxidized://stats, oxidized://node/{{name}}, oxidized://node/{{name}}/config, oxidized://node/{{name}}/versions\n\
                          [Next Step] Use one of the available resource URIs.",
                         uri
                     ),
@@ -288,7 +437,9 @@ async fn main() {
     let server = OxidizedServer::new(config);
 
     info!("MCP server initialized, starting stdio transport");
-    info!("Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://stats");
+    info!(
+        "Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://node/{{name}}/config, oxidized://node/{{name}}/versions, oxidized://stats"
+    );
 
     // Run the server with stdio transport
     if let Err(e) = server.serve(rmcp::transport::stdio()).await {

@@ -18,7 +18,9 @@
 use mcp_oxidized::config::Config;
 use mcp_oxidized::error::OxidizedError;
 use mcp_oxidized::oxidized::{OxidizedBackend, OxidizedClient};
-use mcp_oxidized::resources::{get_node, get_stats, list_nodes};
+use mcp_oxidized::resources::{
+    get_node, get_node_config, get_node_version, get_node_versions, get_stats, list_nodes,
+};
 
 /// Helper to create a client from environment variables.
 fn create_client_from_env() -> OxidizedClient {
@@ -585,4 +587,285 @@ async fn test_list_nodes_cache_metadata() {
     // Second call - cache hit
     let second = list_nodes(&client, None, None, None).await.unwrap();
     assert!(second.metadata.cache_hit, "Second call should be cache hit");
+}
+
+// =============================================================================
+// Configuration Access Resources Tests (Story 1.7)
+// =============================================================================
+
+/// Test that get_node_config() returns configuration with size metadata.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_config_returns_data_with_size() {
+    let client = create_client_from_env();
+
+    // Get a valid node name with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes.items.iter().find(|n| n.status == "success");
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+    let result = get_node_config(&client, node_name).await;
+
+    assert!(result.is_ok(), "get_node_config should succeed");
+
+    let response = result.unwrap();
+    assert!(!response.config.is_empty(), "Config should not be empty");
+    assert!(response.size.bytes > 0, "Should have size metadata bytes");
+    assert!(response.size.lines > 0, "Should have line count");
+    assert!(
+        response.size.estimated_tokens > 0,
+        "Should have estimated tokens"
+    );
+
+    // Verify token estimation is reasonable (bytes/4)
+    assert_eq!(
+        response.size.estimated_tokens,
+        response.size.bytes / 4,
+        "Token estimation should be bytes/4"
+    );
+}
+
+/// Test that get_node_config() returns NodeNotFound with suggestions.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_config_not_found_has_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    let result = get_node_config(&client, &non_existent).await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+        }
+        other => panic!("Expected NodeNotFound, got: {:?}", other),
+    }
+}
+
+/// Test that get_node_versions() returns version list sorted descending.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_versions_sorted_descending() {
+    let client = create_client_from_env();
+
+    // Get a valid node name with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes.items.iter().find(|n| n.status == "success");
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+    let result = get_node_versions(&client, node_name).await;
+
+    assert!(result.is_ok(), "get_node_versions should succeed");
+
+    let response = result.unwrap();
+    assert_eq!(
+        response.total,
+        response.versions.len(),
+        "Total should match versions count"
+    );
+
+    // Verify descending order (if more than 1 version)
+    if response.versions.len() > 1 {
+        for i in 0..response.versions.len() - 1 {
+            assert!(
+                response.versions[i].date >= response.versions[i + 1].date,
+                "Versions should be sorted newest first"
+            );
+        }
+    }
+}
+
+/// Test that get_node_versions() returns NodeNotFound with suggestions.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_versions_not_found_has_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    let result = get_node_versions(&client, &non_existent).await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+        }
+        other => panic!("Expected NodeNotFound, got: {:?}", other),
+    }
+}
+
+/// Test that get_node_version() returns historical config with size metadata.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_version_returns_historical_config() {
+    let client = create_client_from_env();
+
+    // Get a valid node with versions
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes.items.iter().find(|n| n.status == "success");
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Get versions for this node
+    let versions = get_node_versions(&client, node_name).await;
+    if versions.is_err() || versions.as_ref().unwrap().versions.is_empty() {
+        println!("SKIP: No versions available for node {}", node_name);
+        return;
+    }
+
+    let version = &versions.unwrap().versions[0];
+    let oid = &version.oid;
+
+    // Get specific version config
+    let result = get_node_version(&client, node_name, oid).await;
+
+    assert!(result.is_ok(), "get_node_version should succeed");
+
+    let response = result.unwrap();
+    assert!(!response.config.is_empty(), "Config should not be empty");
+    assert_eq!(response.oid, *oid, "OID should match request");
+    assert!(response.size.bytes > 0, "Should have size metadata");
+}
+
+/// Test that get_node_version() returns error for invalid OID.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_version_invalid_oid_returns_error() {
+    let client = create_client_from_env();
+
+    // Get a valid node name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let node_name = &nodes.items[0].name;
+
+    // Request with invalid OID
+    let result = get_node_version(&client, node_name, "invalid-oid-that-does-not-exist").await;
+
+    assert!(result.is_err(), "Should return error for invalid OID");
+
+    // Verify the error type is appropriate (NodeNotFound or HttpError)
+    let err = result.unwrap_err();
+    match &err {
+        OxidizedError::NodeNotFound(_, _) | OxidizedError::HttpError { .. } => {
+            // Expected error types for invalid OID
+        }
+        other => panic!(
+            "Expected NodeNotFound or HttpError for invalid OID, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// Test that get_node_version() returns NodeNotFound with suggestions for invalid node.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_version_not_found_has_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    // Request with non-existent node and any OID
+    let result = get_node_version(&client, &non_existent, "any-oid").await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+            println!(
+                "NodeNotFound correctly returned {} suggestions: {:?}",
+                suggestions.len(),
+                suggestions
+            );
+        }
+        other => panic!("Expected NodeNotFound, got: {:?}", other),
+    }
+}
+
+/// Test config cache hit/miss for get_node_config.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_config_cache_hit() {
+    let client = create_client_from_env();
+
+    // Get a valid node name with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes.items.iter().find(|n| n.status == "success");
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // First call - cache miss
+    let first = get_node_config(&client, node_name).await.unwrap();
+    assert!(!first.metadata.cache_hit, "First call should be cache miss");
+
+    // Second call - cache hit
+    let second = get_node_config(&client, node_name).await.unwrap();
+    assert!(second.metadata.cache_hit, "Second call should be cache hit");
+
+    // Config should be identical
+    assert_eq!(first.config, second.config, "Cached config should match");
 }

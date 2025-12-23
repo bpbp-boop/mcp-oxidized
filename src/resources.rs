@@ -1,8 +1,9 @@
-//! MCP Resource handlers for Oxidized node discovery.
+//! MCP Resource handlers for Oxidized node discovery and configuration access.
 //!
 //! This module provides MCP Resources for discovering and viewing network nodes
-//! in the Oxidized inventory. Resources are read-only data endpoints that expose
-//! node information, statistics, and individual node details.
+//! in the Oxidized inventory, accessing configurations, and viewing version history.
+//! Resources are read-only data endpoints that expose node information, statistics,
+//! configurations, and version history.
 //!
 //! # Resources
 //!
@@ -10,6 +11,9 @@
 //! |-----|-------------|-------------|
 //! | `oxidized://nodes` | List all nodes (paginated if > 100) | FR1, FR2, FR31 |
 //! | `oxidized://node/{name}` | Details of a specific node | FR3, FR4 |
+//! | `oxidized://node/{name}/config` | Current configuration with size metadata | FR5, FR42 |
+//! | `oxidized://node/{name}/versions` | Version history (sorted newest first) | FR6 |
+//! | `oxidized://node/{name}/versions/{oid}` | Historical config at specific version | FR7, FR42 |
 //! | `oxidized://stats` | Global statistics | FR33 |
 //!
 //! # Pagination
@@ -19,10 +23,17 @@
 //! - `offset`: Starting index (default: 0)
 //! - `limit`: Number of items per page (default: 100, max: 500)
 //!
+//! # Size Metadata (FR42)
+//!
+//! Configuration responses include size metadata for LLM context awareness:
+//! - `bytes`: Configuration size in bytes
+//! - `lines`: Number of lines
+//! - `estimated_tokens`: Approximate token count (~4 chars per token)
+//!
 //! # Example
 //!
 //! ```ignore
-//! use mcp_oxidized::resources::{list_nodes, get_node, get_stats};
+//! use mcp_oxidized::resources::{list_nodes, get_node, get_stats, get_node_config};
 //! use mcp_oxidized::oxidized::OxidizedClient;
 //!
 //! let client = OxidizedClient::new(&config);
@@ -32,6 +43,10 @@
 //!
 //! // Get a specific node
 //! let node = get_node(&client, "SW-Core-01").await?;
+//!
+//! // Get node configuration with size metadata
+//! let config = get_node_config(&client, "SW-Core-01").await?;
+//! println!("Config size: {} bytes, ~{} tokens", config.size.bytes, config.size.estimated_tokens);
 //!
 //! // Get global statistics
 //! let stats = get_stats(&client).await?;
@@ -43,7 +58,7 @@ use serde::Serialize;
 use tracing::instrument;
 
 use crate::error::OxidizedError;
-use crate::oxidized::{CacheMetadata, CachedStats, Node, OxidizedBackend};
+use crate::oxidized::{CacheMetadata, CachedStats, Node, NodeVersion, OxidizedBackend};
 
 // ============================================================================
 // Pagination Constants (FR31)
@@ -126,6 +141,93 @@ pub struct NodeResponse {
     pub node: Node,
     /// Cache metadata indicating hit/miss status.
     pub metadata: CacheMetadata,
+}
+
+// ============================================================================
+// Configuration Metadata Types (FR42)
+// ============================================================================
+
+/// Metadata about configuration size for LLM context awareness (FR42).
+///
+/// Provides size information to help LLMs understand the scale of
+/// configuration data before processing it.
+///
+/// # Example
+///
+/// ```
+/// use mcp_oxidized::resources::ConfigMetadata;
+///
+/// let config = "hostname router1\ninterface eth0\n  ip address 10.0.0.1/24";
+/// let meta = ConfigMetadata::from_config(config);
+///
+/// assert_eq!(meta.lines, 3);
+/// assert!(meta.bytes > 0);
+/// assert_eq!(meta.estimated_tokens, meta.bytes / 4);
+/// ```
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigMetadata {
+    /// Configuration size in bytes.
+    pub bytes: usize,
+    /// Number of lines in configuration.
+    pub lines: usize,
+    /// Estimated token count (~4 chars per token).
+    pub estimated_tokens: usize,
+}
+
+impl ConfigMetadata {
+    /// Calculate metadata for a configuration string.
+    ///
+    /// Token estimation uses a rough approximation of ~4 characters per token,
+    /// which is typical for network device configurations.
+    pub fn from_config(config: &str) -> Self {
+        let bytes = config.len();
+        let lines = config.lines().count();
+        // Token estimation: ~4 characters per token (rough approximation)
+        let estimated_tokens = bytes / 4;
+
+        Self {
+            bytes,
+            lines,
+            estimated_tokens,
+        }
+    }
+}
+
+/// Response wrapper for configuration with size and cache metadata (FR5, FR42).
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigResponse {
+    /// The configuration text.
+    pub config: String,
+    /// Size metadata for LLM context awareness.
+    pub size: ConfigMetadata,
+    /// Cache status metadata.
+    pub metadata: CacheMetadata,
+}
+
+/// Response wrapper for version list (FR6).
+///
+/// Note: The `metadata` field is included for API consistency with other responses,
+/// but always returns `cache_hit: false` because version lists are not cached
+/// (architectural decision: historical data rarely accessed repeatedly).
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionsResponse {
+    /// List of versions, sorted newest first.
+    pub versions: Vec<NodeVersion>,
+    /// Total number of versions.
+    pub total: usize,
+    /// Cache status metadata (always miss - versions not cached).
+    pub metadata: CacheMetadata,
+}
+
+/// Response wrapper for historical version configuration (FR7, FR42).
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionConfigResponse {
+    /// The configuration text at this version.
+    pub config: String,
+    /// The version OID (Git commit hash).
+    pub oid: String,
+    /// Size metadata for LLM context awareness.
+    pub size: ConfigMetadata,
 }
 
 // ============================================================================
@@ -356,6 +458,145 @@ pub async fn get_stats<B: OxidizedBackend>(backend: &B) -> Result<CachedStats, O
         stats,
         metadata: cache_meta,
     })
+}
+
+/// Get current configuration for a node (FR5, FR42).
+///
+/// Retrieves the latest configuration text for a node with size metadata
+/// for LLM context awareness.
+///
+/// # Arguments
+///
+/// * `backend` - The Oxidized backend to fetch config from
+/// * `name` - The node name to get configuration for
+///
+/// # Returns
+///
+/// Configuration text with size and cache metadata.
+///
+/// # Errors
+///
+/// - [`OxidizedError::NodeNotFound`] - Node does not exist (includes suggestions)
+/// - [`OxidizedError::ApiUnreachable`] - Network/connection error
+#[instrument(skip(backend), fields(node = %name))]
+pub async fn get_node_config<B: OxidizedBackend>(
+    backend: &B,
+    name: &str,
+) -> Result<ConfigResponse, OxidizedError> {
+    match backend.get_node_config(name).await {
+        Ok((config, cache_meta)) => {
+            let size = ConfigMetadata::from_config(&config);
+            Ok(ConfigResponse {
+                config,
+                size,
+                metadata: cache_meta,
+            })
+        }
+        Err(OxidizedError::NodeNotFound(node_name, _)) => {
+            // Fetch nodes to generate suggestions (reuse pattern from get_node)
+            let suggestions = match backend.get_nodes().await {
+                Ok((nodes, _)) => find_similar_nodes(&nodes, &node_name, MAX_SUGGESTIONS),
+                Err(_) => vec![],
+            };
+            Err(OxidizedError::NodeNotFound(node_name, suggestions))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Get version history for a node (FR6).
+///
+/// Retrieves a list of configuration versions, sorted by date descending
+/// (newest first).
+///
+/// # Arguments
+///
+/// * `backend` - The Oxidized backend to fetch versions from
+/// * `name` - The node name to get versions for
+///
+/// # Returns
+///
+/// List of versions with total count and cache metadata.
+///
+/// # Errors
+///
+/// - [`OxidizedError::NodeNotFound`] - Node does not exist (includes suggestions)
+/// - [`OxidizedError::ApiUnreachable`] - Network/connection error
+#[instrument(skip(backend), fields(node = %name))]
+pub async fn get_node_versions<B: OxidizedBackend>(
+    backend: &B,
+    name: &str,
+) -> Result<VersionsResponse, OxidizedError> {
+    match backend.get_node_versions(name).await {
+        Ok(mut versions) => {
+            // Sort by date descending (newest first)
+            versions.sort_by(|a, b| b.date.cmp(&a.date));
+
+            let total = versions.len();
+
+            Ok(VersionsResponse {
+                versions,
+                total,
+                // Versions are not cached (historical data)
+                metadata: CacheMetadata::miss(),
+            })
+        }
+        Err(OxidizedError::NodeNotFound(node_name, _)) => {
+            // Fetch nodes to generate suggestions
+            let suggestions = match backend.get_nodes().await {
+                Ok((nodes, _)) => find_similar_nodes(&nodes, &node_name, MAX_SUGGESTIONS),
+                Err(_) => vec![],
+            };
+            Err(OxidizedError::NodeNotFound(node_name, suggestions))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Get configuration at a specific version (FR7, FR42).
+///
+/// Retrieves the configuration text at a specific point in time,
+/// identified by the Git commit OID.
+///
+/// # Arguments
+///
+/// * `backend` - The Oxidized backend to fetch version config from
+/// * `name` - The node name
+/// * `oid` - The Git object ID (commit hash) of the version
+///
+/// # Returns
+///
+/// Configuration text with OID and size metadata.
+///
+/// # Errors
+///
+/// - [`OxidizedError::NodeNotFound`] - Node or version does not exist (includes suggestions)
+/// - [`OxidizedError::ApiUnreachable`] - Network/connection error
+#[instrument(skip(backend), fields(node = %name, oid = %oid))]
+pub async fn get_node_version<B: OxidizedBackend>(
+    backend: &B,
+    name: &str,
+    oid: &str,
+) -> Result<VersionConfigResponse, OxidizedError> {
+    match backend.get_node_version(name, oid).await {
+        Ok(config) => {
+            let size = ConfigMetadata::from_config(&config);
+            Ok(VersionConfigResponse {
+                config,
+                oid: oid.to_string(),
+                size,
+            })
+        }
+        Err(OxidizedError::NodeNotFound(node_name, _)) => {
+            // Fetch nodes to generate suggestions (reuse pattern from other handlers)
+            let suggestions = match backend.get_nodes().await {
+                Ok((nodes, _)) => find_similar_nodes(&nodes, &node_name, MAX_SUGGESTIONS),
+                Err(_) => vec![],
+            };
+            Err(OxidizedError::NodeNotFound(node_name, suggestions))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ============================================================================
@@ -766,5 +1007,243 @@ mod tests {
         assert!(json.contains("\"limit\":100"));
         assert!(json.contains("\"has_more\":false"));
         assert!(json.contains("\"cache_hit\":false"));
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigMetadata Tests (FR42)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_metadata_empty() {
+        let meta = ConfigMetadata::from_config("");
+
+        assert_eq!(meta.bytes, 0);
+        assert_eq!(meta.lines, 0);
+        assert_eq!(meta.estimated_tokens, 0);
+    }
+
+    #[test]
+    fn test_config_metadata_single_line() {
+        let meta = ConfigMetadata::from_config("hostname router1");
+
+        assert_eq!(meta.bytes, 16);
+        assert_eq!(meta.lines, 1);
+        assert_eq!(meta.estimated_tokens, 4); // 16/4
+    }
+
+    #[test]
+    fn test_config_metadata_multiline() {
+        let config = "hostname router1\ninterface eth0\n  ip address 10.0.0.1/24";
+        let meta = ConfigMetadata::from_config(config);
+
+        assert_eq!(meta.lines, 3);
+        assert!(meta.bytes > 0);
+        assert_eq!(meta.estimated_tokens, meta.bytes / 4);
+    }
+
+    #[test]
+    fn test_config_metadata_token_estimation() {
+        // Test edge cases: 0-3 chars all result in 0 tokens (bytes/4 rounds down)
+        assert_eq!(ConfigMetadata::from_config("").estimated_tokens, 0);
+        assert_eq!(ConfigMetadata::from_config("a").estimated_tokens, 0);
+        assert_eq!(ConfigMetadata::from_config("ab").estimated_tokens, 0);
+        assert_eq!(ConfigMetadata::from_config("abc").estimated_tokens, 0);
+
+        // Test exact boundaries
+        let config_4 = "a".repeat(4);
+        assert_eq!(ConfigMetadata::from_config(&config_4).estimated_tokens, 1);
+
+        let config_100 = "a".repeat(100);
+        assert_eq!(
+            ConfigMetadata::from_config(&config_100).estimated_tokens,
+            25
+        );
+
+        let config_1000 = "a".repeat(1000);
+        assert_eq!(
+            ConfigMetadata::from_config(&config_1000).estimated_tokens,
+            250
+        );
+    }
+
+    #[test]
+    fn test_config_metadata_serializes() {
+        let meta = ConfigMetadata::from_config("test config\nline 2");
+        let json = serde_json::to_string(&meta).expect("Should serialize ConfigMetadata");
+
+        assert!(json.contains("\"bytes\":"));
+        assert!(json.contains("\"lines\":"));
+        assert!(json.contains("\"estimated_tokens\":"));
+    }
+
+    #[test]
+    fn test_config_metadata_realistic_config() {
+        // Simulate a realistic network config
+        let config = r#"!
+hostname SW-Core-01
+!
+interface GigabitEthernet0/1
+  description Uplink to Router
+  ip address 192.168.1.1 255.255.255.0
+  no shutdown
+!
+interface GigabitEthernet0/2
+  description Server VLAN
+  switchport mode access
+  switchport access vlan 100
+!
+vlan 100
+  name Servers
+!
+end
+"#;
+        let meta = ConfigMetadata::from_config(config);
+
+        assert!(meta.bytes > 200, "Should have significant byte count");
+        assert!(meta.lines > 10, "Should have multiple lines");
+        assert!(
+            meta.estimated_tokens > 50,
+            "Should have significant token count"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigResponse Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_response_serializes() {
+        let response = ConfigResponse {
+            config: "hostname router1\n".to_string(),
+            size: ConfigMetadata::from_config("hostname router1\n"),
+            metadata: CacheMetadata::hit(),
+        };
+
+        let json = serde_json::to_string(&response).expect("Should serialize ConfigResponse");
+        assert!(json.contains("\"config\":"));
+        assert!(json.contains("\"size\":"));
+        assert!(json.contains("\"metadata\":"));
+        assert!(json.contains("\"cache_hit\":true"));
+    }
+
+    // -------------------------------------------------------------------------
+    // VersionsResponse Tests
+    // -------------------------------------------------------------------------
+
+    fn create_test_version(oid: &str, date: &str) -> NodeVersion {
+        NodeVersion {
+            oid: oid.to_string(),
+            date: date.to_string(),
+            author: "oxidized".to_string(),
+            message: format!("update node {}", oid),
+        }
+    }
+
+    #[test]
+    fn test_versions_sorted_newest_first() {
+        let mut versions = vec![
+            create_test_version("old", "2025-01-01 00:00:00 UTC"),
+            create_test_version("new", "2025-01-15 00:00:00 UTC"),
+            create_test_version("mid", "2025-01-10 00:00:00 UTC"),
+        ];
+
+        // Sort by date descending (newest first)
+        versions.sort_by(|a, b| b.date.cmp(&a.date));
+
+        assert_eq!(versions[0].oid, "new");
+        assert_eq!(versions[1].oid, "mid");
+        assert_eq!(versions[2].oid, "old");
+    }
+
+    #[test]
+    fn test_versions_empty_list() {
+        let versions: Vec<NodeVersion> = vec![];
+
+        let response = VersionsResponse {
+            versions: versions.clone(),
+            total: versions.len(),
+            metadata: CacheMetadata::miss(),
+        };
+
+        assert_eq!(response.total, 0);
+        assert!(response.versions.is_empty());
+    }
+
+    #[test]
+    fn test_versions_single_version() {
+        let mut versions = vec![create_test_version("only", "2025-01-15 00:00:00 UTC")];
+
+        versions.sort_by(|a, b| b.date.cmp(&a.date));
+
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].oid, "only");
+    }
+
+    #[test]
+    fn test_versions_same_timestamp_stable_sort() {
+        let mut versions = vec![
+            create_test_version("first", "2025-01-15 00:00:00 UTC"),
+            create_test_version("second", "2025-01-15 00:00:00 UTC"),
+            create_test_version("third", "2025-01-15 00:00:00 UTC"),
+        ];
+
+        // Stable sort should preserve order for equal elements
+        versions.sort_by(|a, b| b.date.cmp(&a.date));
+
+        // All have same date, so original order is preserved
+        assert_eq!(versions.len(), 3);
+    }
+
+    #[test]
+    fn test_versions_response_serializes() {
+        let response = VersionsResponse {
+            versions: vec![
+                create_test_version("abc123", "2025-01-15 10:30:00 UTC"),
+                create_test_version("def456", "2025-01-14 09:00:00 UTC"),
+            ],
+            total: 2,
+            metadata: CacheMetadata::miss(),
+        };
+
+        let json = serde_json::to_string(&response).expect("Should serialize VersionsResponse");
+        assert!(json.contains("\"versions\":"));
+        assert!(json.contains("\"total\":2"));
+        assert!(json.contains("\"abc123\""));
+        assert!(json.contains("\"def456\""));
+    }
+
+    // -------------------------------------------------------------------------
+    // VersionConfigResponse Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_version_config_response_serializes() {
+        let response = VersionConfigResponse {
+            config: "hostname router1\n".to_string(),
+            oid: "abc123def456".to_string(),
+            size: ConfigMetadata::from_config("hostname router1\n"),
+        };
+
+        let json =
+            serde_json::to_string(&response).expect("Should serialize VersionConfigResponse");
+        assert!(json.contains("\"config\":"));
+        assert!(json.contains("\"oid\":\"abc123def456\""));
+        assert!(json.contains("\"size\":"));
+        assert!(json.contains("\"bytes\":"));
+        assert!(json.contains("\"lines\":"));
+        assert!(json.contains("\"estimated_tokens\":"));
+    }
+
+    #[test]
+    fn test_version_config_response_no_cache_metadata() {
+        let response = VersionConfigResponse {
+            config: "config data".to_string(),
+            oid: "abc123".to_string(),
+            size: ConfigMetadata::from_config("config data"),
+        };
+
+        let json = serde_json::to_string(&response).expect("Should serialize");
+        // VersionConfigResponse does NOT include cache metadata (historical data)
+        assert!(!json.contains("cache_hit"));
     }
 }
