@@ -2,13 +2,16 @@ use mcp_oxidized::config::Config;
 use mcp_oxidized::error::{Actionable, OxidizedError};
 use mcp_oxidized::oxidized::OxidizedClient;
 use mcp_oxidized::resources;
+use mcp_oxidized::tools;
 use rmcp::model::{
-    Annotated, ErrorCode, Implementation, ListResourceTemplatesResult, ListResourcesResult,
-    PaginatedRequestParam, ProtocolVersion, RawResource, RawResourceTemplate,
-    ReadResourceRequestParam, ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+    Annotated, CallToolRequestParam, CallToolResult, Content, ErrorCode, Implementation,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParam,
+    ProtocolVersion, RawResource, RawResourceTemplate, ReadResourceRequestParam,
+    ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
+use std::borrow::Cow;
 use std::future::Future;
 use std::sync::Arc;
 use tracing::{error, info, instrument};
@@ -25,6 +28,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// - `oxidized://node/{name}/versions` - Get version history (FR6)
 /// - `oxidized://node/{name}/versions/{oid}` - Get specific version config (FR7)
 /// - `oxidized://stats` - Global statistics
+///
+/// Provides tools for backup and queue management:
+/// - `fetch_node_config` - Trigger immediate backup (FR15)
+/// - `prioritize_node` - Prioritize node in queue (FR16)
 #[derive(Clone)]
 struct OxidizedServer {
     client: Arc<OxidizedClient>,
@@ -64,7 +71,10 @@ impl ServerHandler for OxidizedServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_resources().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_resources()
+                .enable_tools()
+                .build(),
             server_info: Implementation {
                 name: "mcp-oxidized".to_string(),
                 title: Some("Oxidized MCP Server".to_string()),
@@ -400,6 +410,174 @@ impl ServerHandler for OxidizedServer {
             }
         }
     }
+
+    #[instrument(skip(self, _context), fields(request_id = %resources::generate_request_id()))]
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        async move {
+            // Helper to convert serde_json::Value to JsonObject (Map<String, Value>)
+            fn value_to_json_object(
+                v: serde_json::Value,
+            ) -> std::sync::Arc<serde_json::Map<String, serde_json::Value>> {
+                match v {
+                    serde_json::Value::Object(map) => std::sync::Arc::new(map),
+                    _ => std::sync::Arc::new(serde_json::Map::new()),
+                }
+            }
+
+            let tools = vec![
+                Tool {
+                    name: Cow::Borrowed("fetch_node_config"),
+                    title: Some("Fetch Node Configuration".to_string()),
+                    description: Some(Cow::Borrowed(
+                        "Trigger an immediate backup of a node's configuration. \
+                         The fresh configuration will be available shortly after.",
+                    )),
+                    input_schema: value_to_json_object(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "node": {
+                                "type": "string",
+                                "description": "The node name to backup"
+                            }
+                        },
+                        "required": ["node"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
+                Tool {
+                    name: Cow::Borrowed("prioritize_node"),
+                    title: Some("Prioritize Node".to_string()),
+                    description: Some(Cow::Borrowed(
+                        "Move a node to the front of the backup queue. \
+                         The node will be processed before other pending nodes.",
+                    )),
+                    input_schema: value_to_json_object(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "node": {
+                                "type": "string",
+                                "description": "The node name to prioritize"
+                            }
+                        },
+                        "required": ["node"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
+            ];
+
+            Ok(ListToolsResult {
+                tools,
+                next_cursor: None,
+                meta: None,
+            })
+        }
+    }
+
+    #[instrument(skip(self, _context), fields(request_id = %resources::generate_request_id(), tool = %request.name))]
+    fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        let client = Arc::clone(&self.client);
+
+        async move {
+            let tool_name = request.name.as_ref();
+            let args = &request.arguments;
+
+            match tool_name {
+                "fetch_node_config" => {
+                    let node = args
+                        .as_ref()
+                        .and_then(|a| a.get("node"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::new(
+                                ErrorCode::INVALID_PARAMS,
+                                "[Error] Missing required parameter 'node'.\n\
+                                 [Context] Tool 'fetch_node_config' requires a node name.\n\
+                                 [Next Step] Provide a valid node name parameter.",
+                                None,
+                            )
+                        })?;
+
+                    let result = tools::fetch_node_config(&client, node)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to serialize result: {}", e),
+                            None,
+                        )
+                    })?;
+
+                    Ok(CallToolResult {
+                        content: vec![Content::text(json)],
+                        structured_content: None,
+                        is_error: Some(false),
+                        meta: None,
+                    })
+                }
+                "prioritize_node" => {
+                    let node = args
+                        .as_ref()
+                        .and_then(|a| a.get("node"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::new(
+                                ErrorCode::INVALID_PARAMS,
+                                "[Error] Missing required parameter 'node'.\n\
+                                 [Context] Tool 'prioritize_node' requires a node name.\n\
+                                 [Next Step] Provide a valid node name parameter.",
+                                None,
+                            )
+                        })?;
+
+                    let result = tools::prioritize_node(&client, node)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to serialize result: {}", e),
+                            None,
+                        )
+                    })?;
+
+                    Ok(CallToolResult {
+                        content: vec![Content::text(json)],
+                        structured_content: None,
+                        is_error: Some(false),
+                        meta: None,
+                    })
+                }
+                _ => Err(McpError::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    format!(
+                        "[Error] Unknown tool: '{}'\n\
+                         [Context] Attempted to call a tool that does not exist.\n\
+                         [Suggestions] Available tools: fetch_node_config, prioritize_node\n\
+                         [Next Step] Use one of the available tool names.",
+                        tool_name
+                    ),
+                    None,
+                )),
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -440,6 +618,7 @@ async fn main() {
     info!(
         "Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://node/{{name}}/config, oxidized://node/{{name}}/versions, oxidized://stats"
     );
+    info!("Tools available: fetch_node_config, prioritize_node");
 
     // Run the server with stdio transport
     if let Err(e) = server.serve(rmcp::transport::stdio()).await {

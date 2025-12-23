@@ -869,3 +869,139 @@ async fn test_get_node_config_cache_hit() {
     // Config should be identical
     assert_eq!(first.config, second.config, "Cached config should match");
 }
+
+// =============================================================================
+// Backup & Queue Management Tools Tests (Story 1.8)
+// =============================================================================
+
+use mcp_oxidized::tools;
+
+/// Test that fetch_node_config triggers a backup for a valid node.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_fetch_node_config_triggers_backup() {
+    let client = create_client_from_env();
+
+    // Get a valid node name first
+    let (nodes, _) = client.get_nodes().await.expect("Should get nodes");
+
+    if nodes.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let node_name = &nodes[0].name;
+
+    let result = tools::fetch_node_config(&client, node_name).await;
+    assert!(result.is_ok(), "fetch_node_config should succeed");
+
+    let tool_result = result.unwrap();
+    assert!(tool_result.success, "Tool result should indicate success");
+    assert_eq!(tool_result.node, *node_name, "Node name should match");
+    assert!(
+        tool_result.message.contains("Backup triggered"),
+        "Message should indicate backup was triggered"
+    );
+}
+
+/// Test that prioritize_node updates queue for a valid node.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_prioritize_node_updates_queue() {
+    let client = create_client_from_env();
+
+    // Get a valid node name first
+    let (nodes, _) = client.get_nodes().await.expect("Should get nodes");
+
+    if nodes.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let node_name = &nodes[0].name;
+
+    let result = tools::prioritize_node(&client, node_name).await;
+    assert!(result.is_ok(), "prioritize_node should succeed");
+
+    let tool_result = result.unwrap();
+    assert!(tool_result.success, "Tool result should indicate success");
+    assert_eq!(tool_result.node, *node_name, "Node name should match");
+    assert!(
+        tool_result.message.contains("prioritized"),
+        "Message should indicate node was prioritized"
+    );
+}
+
+/// Test that fetch_node_config returns NodeNotFound with suggestions for invalid node.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_fetch_node_config_invalid_node_returns_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    let result = tools::fetch_node_config(&client, &non_existent).await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+            println!(
+                "NodeNotFound correctly returned {} suggestions: {:?}",
+                suggestions.len(),
+                suggestions
+            );
+        }
+        other => panic!("Expected NodeNotFound error, got: {:?}", other),
+    }
+}
+
+/// Test that prioritize_node returns NodeNotFound with suggestions for invalid node.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_prioritize_node_invalid_node_returns_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    let result = tools::prioritize_node(&client, &non_existent).await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+            println!(
+                "NodeNotFound correctly returned {} suggestions: {:?}",
+                suggestions.len(),
+                suggestions
+            );
+        }
+        other => panic!("Expected NodeNotFound error, got: {:?}", other),
+    }
+}
