@@ -1,7 +1,4 @@
-mod config;
-pub mod error;
-
-use config::Config;
+use mcp_oxidized::config::Config;
 use rmcp::{ServerHandler, ServiceExt, model::ServerInfo};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};

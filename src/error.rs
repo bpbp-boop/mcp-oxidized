@@ -189,6 +189,18 @@ pub enum OxidizedError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// HTTP error response (4xx/5xx status codes not covered by specific variants).
+    ///
+    /// Used for server errors (5xx) which are transient and retryable,
+    /// and other client errors (4xx) not covered by NodeNotFound or AuthFailed.
+    #[error("HTTP error {status_code} for {context}")]
+    HttpError {
+        /// HTTP status code
+        status_code: u16,
+        /// Context describing the operation that failed
+        context: String,
+    },
 }
 
 // ============================================================================
@@ -284,6 +296,35 @@ impl Actionable for OxidizedError {
                     NEXT_STEP_PREFIX
                 )
             }
+
+            OxidizedError::HttpError {
+                status_code,
+                context,
+            } => {
+                let error_type = if *status_code >= 500 {
+                    "Server error"
+                } else {
+                    "Client error"
+                };
+
+                let suggestion = if *status_code >= 500 {
+                    "This is a server-side issue. The request may succeed if retried."
+                } else {
+                    "Check the request parameters and resource existence."
+                };
+
+                format!(
+                    "{} {} (HTTP {}) for {}.\n{} HTTP request to Oxidized API returned error status.\n{} {}\n{} Retry the request or check Oxidized server status.",
+                    ERROR_PREFIX,
+                    error_type,
+                    status_code,
+                    context,
+                    CONTEXT_PREFIX,
+                    SUGGESTIONS_PREFIX,
+                    suggestion,
+                    NEXT_STEP_PREFIX
+                )
+            }
         }
     }
 
@@ -291,6 +332,9 @@ impl Actionable for OxidizedError {
         match self {
             // Retryable: network issues may be temporary
             OxidizedError::ApiUnreachable { .. } => true,
+
+            // Retryable: 5xx server errors are transient
+            OxidizedError::HttpError { status_code, .. } => *status_code >= 500,
 
             // Not retryable: these are permanent errors
             OxidizedError::NodeNotFound(_, _) => false,
@@ -649,6 +693,53 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // HttpError Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_http_error_5xx_message_format() {
+        let error = OxidizedError::HttpError {
+            status_code: 503,
+            context: "get_nodes".to_string(),
+        };
+
+        let message = error.to_llm_message();
+
+        assert!(message.contains(ERROR_PREFIX));
+        assert!(message.contains(CONTEXT_PREFIX));
+        assert!(message.contains(SUGGESTIONS_PREFIX));
+        assert!(message.contains(NEXT_STEP_PREFIX));
+        assert!(message.contains("503"));
+        assert!(message.contains("Server error"));
+        assert!(message.contains("get_nodes"));
+    }
+
+    #[test]
+    fn test_http_error_4xx_message_format() {
+        let error = OxidizedError::HttpError {
+            status_code: 400,
+            context: "bad_request".to_string(),
+        };
+
+        let message = error.to_llm_message();
+
+        assert!(message.contains("400"));
+        assert!(message.contains("Client error"));
+        assert!(message.contains("bad_request"));
+    }
+
+    #[test]
+    fn test_http_error_display() {
+        let error = OxidizedError::HttpError {
+            status_code: 502,
+            context: "proxy".to_string(),
+        };
+
+        let display = format!("{}", error);
+        assert_eq!(display, "HTTP error 502 for proxy");
+    }
+
+    // -------------------------------------------------------------------------
     // Security Tests (NFR6)
     // -------------------------------------------------------------------------
 
@@ -665,6 +756,10 @@ mod tests {
             OxidizedError::ParseError {
                 context: "test".to_string(),
                 source: serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+            },
+            OxidizedError::HttpError {
+                status_code: 500,
+                context: "test".to_string(),
             },
         ];
 
@@ -714,6 +809,36 @@ mod tests {
         // Transient (retryable)
         assert!(create_api_unreachable_error(1, None).is_transient());
 
+        // HttpError: 5xx is transient, 4xx is not
+        assert!(
+            OxidizedError::HttpError {
+                status_code: 500,
+                context: "test".to_string()
+            }
+            .is_transient()
+        );
+        assert!(
+            OxidizedError::HttpError {
+                status_code: 503,
+                context: "test".to_string()
+            }
+            .is_transient()
+        );
+        assert!(
+            !OxidizedError::HttpError {
+                status_code: 400,
+                context: "test".to_string()
+            }
+            .is_transient()
+        );
+        assert!(
+            !OxidizedError::HttpError {
+                status_code: 429,
+                context: "test".to_string()
+            }
+            .is_transient()
+        );
+
         // Not transient (permanent)
         assert!(!OxidizedError::NodeNotFound("n".to_string(), vec![]).is_transient());
         assert!(!OxidizedError::InvalidRegex("p".to_string()).is_transient());
@@ -745,6 +870,10 @@ mod tests {
             OxidizedError::ParseError {
                 context: "c".to_string(),
                 source: serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+            },
+            OxidizedError::HttpError {
+                status_code: 502,
+                context: "c".to_string(),
             },
         ];
 
@@ -787,9 +916,8 @@ mod tests {
     // as the runtime creation overhead is negligible (~1ms per test).
     fn create_api_unreachable_error(attempt: u8, last_success: Option<String>) -> OxidizedError {
         let runtime = tokio::runtime::Runtime::new().expect("Failed to create test runtime");
-        let error = runtime.block_on(async {
-            reqwest::get("http://127.0.0.1:0").await.unwrap_err()
-        });
+        let error =
+            runtime.block_on(async { reqwest::get("http://127.0.0.1:0").await.unwrap_err() });
 
         OxidizedError::ApiUnreachable {
             source: error,

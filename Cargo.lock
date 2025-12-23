@@ -778,6 +778,7 @@ dependencies = [
 name = "mcp-oxidized"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "moka",
  "reqwest",
  "rmcp",

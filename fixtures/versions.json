@@ -1,0 +1,32 @@
+[
+  {
+    "oid": "abc123def456789012345678901234567890abcd",
+    "date": "2025-01-15 10:30:00 UTC",
+    "author": "oxidized",
+    "message": "update SW-Core-01"
+  },
+  {
+    "oid": "def456abc789012345678901234567890abcdef12",
+    "date": "2025-01-14 10:30:00 UTC",
+    "author": "oxidized",
+    "message": "update SW-Core-01"
+  },
+  {
+    "oid": "789012abc345678901234567890abcdef12345678",
+    "date": "2025-01-13 10:30:00 UTC",
+    "author": "oxidized",
+    "message": "update SW-Core-01"
+  },
+  {
+    "oid": "012345def678901234567890abcdef1234567890ab",
+    "date": "2025-01-12 10:30:00 UTC",
+    "author": "oxidized",
+    "message": "update SW-Core-01"
+  },
+  {
+    "oid": "567890abc123456789012345678901234567890abc",
+    "date": "2025-01-11 10:30:00 UTC",
+    "author": "oxidized",
+    "message": "update SW-Core-01"
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "name": "SW-Core-01",
+  "full_name": "SW-Core-01.network.local",
+  "ip": "192.168.1.1",
+  "group": "switches",
+  "model": "cisco-ios",
+  "status": "success",
+  "last_status": "success",
+  "time": "2025-01-15 10:30:00 UTC",
+  "mtime": "2025-01-15 10:25:00 UTC"
+}

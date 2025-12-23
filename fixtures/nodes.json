@@ -1,0 +1,55 @@
+[
+  {
+    "name": "SW-Core-01",
+    "full_name": "SW-Core-01.network.local",
+    "ip": "192.168.1.1",
+    "group": "switches",
+    "model": "cisco-ios",
+    "status": "success",
+    "last_status": "success",
+    "time": "2025-01-15 10:30:00 UTC",
+    "mtime": "2025-01-15 10:25:00 UTC"
+  },
+  {
+    "name": "SW-Access-02",
+    "full_name": "SW-Access-02.network.local",
+    "ip": "192.168.1.10",
+    "group": "switches",
+    "model": "cisco-ios",
+    "status": "success",
+    "last_status": "success",
+    "time": "2025-01-15 10:32:00 UTC",
+    "mtime": "2025-01-15 10:28:00 UTC"
+  },
+  {
+    "name": "RTR-Edge-01",
+    "full_name": "RTR-Edge-01.network.local",
+    "ip": "192.168.1.254",
+    "group": "routers",
+    "model": "junos",
+    "status": "failure",
+    "last_status": "success",
+    "time": "2025-01-15 10:35:00 UTC",
+    "mtime": "2025-01-14 08:00:00 UTC"
+  },
+  {
+    "name": "FW-Main-01",
+    "full_name": "FW-Main-01.network.local",
+    "ip": "192.168.1.200",
+    "group": "firewalls",
+    "model": "fortinet",
+    "status": "success",
+    "last_status": "success",
+    "time": "2025-01-15 10:40:00 UTC",
+    "mtime": "2025-01-15 10:38:00 UTC"
+  },
+  {
+    "name": "AP-Floor3-01",
+    "full_name": "AP-Floor3-01.network.local",
+    "ip": "192.168.2.50",
+    "group": "wireless",
+    "model": "cisco-wlc",
+    "status": "never",
+    "last_status": "never"
+  }
+]
