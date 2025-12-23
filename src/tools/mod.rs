@@ -3,22 +3,24 @@
 //! Tools are write operations that modify Oxidized state:
 //! - [`fetch_node_config`] - Trigger immediate backup (FR15)
 //! - [`prioritize_node`] - Prioritize node in queue (FR16)
+//! - [`reload_sources`] - Reload source inventory (FR17)
 //!
 //! # Cache Invalidation Rule
 //!
 //! All tools that modify state MUST invalidate relevant caches on success.
-//! The backend methods (`trigger_backup`, `prioritize_node`) handle this
-//! automatically, so tools do not need to call invalidate explicitly.
+//! The backend methods handle this automatically, so tools do not need to
+//! call invalidate explicitly.
 //!
 //! | Tool | Action | Cache Invalidation |
 //! |------|--------|-------------------|
 //! | `fetch_node_config(node)` | Trigger backup | `invalidate_node(node)` (via backend) |
 //! | `prioritize_node(node)` | Prioritize in queue | `invalidate_node(node)` (via backend) |
+//! | `reload_sources()` | Reload inventory | `invalidate_all_nodes()` (via backend) |
 //!
 //! # Example
 //!
 //! ```ignore
-//! use mcp_oxidized::tools::{fetch_node_config, prioritize_node};
+//! use mcp_oxidized::tools::{fetch_node_config, prioritize_node, reload_sources};
 //! use mcp_oxidized::oxidized::OxidizedClient;
 //!
 //! let client = OxidizedClient::new(&config);
@@ -30,13 +32,19 @@
 //! // Prioritize a node in the backup queue
 //! let result = prioritize_node(&client, "SW-Core-01").await?;
 //! println!("{}", result.message);
+//!
+//! // Reload the source inventory
+//! let result = reload_sources(&client).await?;
+//! println!("{}", result.message);
 //! ```
 
 mod fetch_node_config;
 mod prioritize_node;
+mod reload_sources;
 
 pub use fetch_node_config::fetch_node_config;
 pub use prioritize_node::prioritize_node;
+pub use reload_sources::reload_sources;
 
 use crate::error::OxidizedError;
 use crate::oxidized::{OxidizedBackend, OxidizedClient};
@@ -180,5 +188,16 @@ mod tests {
         let result = ToolResult::failure("node", String::from("Error"));
         assert!(!result.success);
         assert_eq!(result.message, "Error");
+    }
+
+    #[test]
+    fn test_reload_sources_result_message() {
+        let result = ToolResult::success(
+            "",
+            "Oxidized sources reloaded. New devices are now available in the inventory.",
+        );
+        assert!(result.success);
+        assert!(result.message.contains("reloaded"));
+        assert!(result.node.is_empty());
     }
 }

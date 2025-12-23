@@ -32,6 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Provides tools for backup and queue management:
 /// - `fetch_node_config` - Trigger immediate backup (FR15)
 /// - `prioritize_node` - Prioritize node in queue (FR16)
+/// - `reload_sources` - Reload source inventory (FR17)
 #[derive(Clone)]
 struct OxidizedServer {
     client: Arc<OxidizedClient>,
@@ -473,6 +474,23 @@ impl ServerHandler for OxidizedServer {
                     icons: None,
                     meta: None,
                 },
+                Tool {
+                    name: Cow::Borrowed("reload_sources"),
+                    title: Some("Reload Sources".to_string()),
+                    description: Some(Cow::Borrowed(
+                        "Reload the Oxidized source inventory. \
+                         New devices will be immediately available after this operation.",
+                    )),
+                    input_schema: value_to_json_object(serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
             ];
 
             Ok(ListToolsResult {
@@ -564,12 +582,33 @@ impl ServerHandler for OxidizedServer {
                         meta: None,
                     })
                 }
+                "reload_sources" => {
+                    // No parameters needed for this tool
+                    let result = tools::reload_sources(&client)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to serialize result: {}", e),
+                            None,
+                        )
+                    })?;
+
+                    Ok(CallToolResult {
+                        content: vec![Content::text(json)],
+                        structured_content: None,
+                        is_error: Some(false),
+                        meta: None,
+                    })
+                }
                 _ => Err(McpError::new(
                     ErrorCode::METHOD_NOT_FOUND,
                     format!(
                         "[Error] Unknown tool: '{}'\n\
                          [Context] Attempted to call a tool that does not exist.\n\
-                         [Suggestions] Available tools: fetch_node_config, prioritize_node\n\
+                         [Suggestions] Available tools: fetch_node_config, prioritize_node, reload_sources\n\
                          [Next Step] Use one of the available tool names.",
                         tool_name
                     ),
@@ -618,7 +657,7 @@ async fn main() {
     info!(
         "Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://node/{{name}}/config, oxidized://node/{{name}}/versions, oxidized://stats"
     );
-    info!("Tools available: fetch_node_config, prioritize_node");
+    info!("Tools available: fetch_node_config, prioritize_node, reload_sources");
 
     // Run the server with stdio transport
     if let Err(e) = server.serve(rmcp::transport::stdio()).await {

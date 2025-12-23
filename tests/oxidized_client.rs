@@ -1005,3 +1005,24 @@ async fn test_prioritize_node_invalid_node_returns_suggestions() {
         other => panic!("Expected NodeNotFound error, got: {:?}", other),
     }
 }
+
+/// Test that reload_sources reloads the Oxidized inventory.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_reload_sources_reloads_inventory() {
+    let client = create_client_from_env();
+
+    let result = tools::reload_sources(&client).await;
+    assert!(result.is_ok(), "reload_sources should succeed");
+
+    let tool_result = result.unwrap();
+    assert!(tool_result.success, "Tool result should indicate success");
+    assert!(
+        tool_result.node.is_empty(),
+        "Node should be empty for reload_sources"
+    );
+    assert!(
+        tool_result.message.contains("reloaded"),
+        "Message should indicate sources were reloaded"
+    );
+}
