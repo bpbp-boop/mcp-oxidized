@@ -618,10 +618,11 @@ mod tests {
             ip: "10.0.0.1".to_string(),
             group: group.to_string(),
             model: "cisco-ios".to_string(),
-            status: "success".to_string(),
-            last_status: "success".to_string(),
+            status: Some("success".to_string()),
+            last_status: Some("success".to_string()),
             time: Some("2025-01-15 10:30:00 UTC".to_string()),
             mtime: Some("2025-01-15 10:25:00 UTC".to_string()),
+            last: None,
         }
     }
 
@@ -916,7 +917,7 @@ mod tests {
         // "SWI" should match both via partial prefix
         let suggestions = find_similar_nodes(&nodes, "SWI", 5);
 
-        assert!(suggestions.len() >= 1);
+        assert!(!suggestions.is_empty());
     }
 
     #[test]
@@ -1131,17 +1132,23 @@ end
     // -------------------------------------------------------------------------
 
     fn create_test_version(oid: &str, date: &str) -> NodeVersion {
+        use crate::oxidized::VersionAuthor;
         NodeVersion {
             oid: oid.to_string(),
             date: date.to_string(),
-            author: "oxidized".to_string(),
+            time: Some(date.to_string()),
+            author: VersionAuthor {
+                name: "oxidized".to_string(),
+                email: "oxidized@example.com".to_string(),
+                time: date.to_string(),
+            },
             message: format!("update node {}", oid),
         }
     }
 
     #[test]
     fn test_versions_sorted_newest_first() {
-        let mut versions = vec![
+        let mut versions = [
             create_test_version("old", "2025-01-01 00:00:00 UTC"),
             create_test_version("new", "2025-01-15 00:00:00 UTC"),
             create_test_version("mid", "2025-01-10 00:00:00 UTC"),
@@ -1171,7 +1178,7 @@ end
 
     #[test]
     fn test_versions_single_version() {
-        let mut versions = vec![create_test_version("only", "2025-01-15 00:00:00 UTC")];
+        let mut versions = [create_test_version("only", "2025-01-15 00:00:00 UTC")];
 
         versions.sort_by(|a, b| b.date.cmp(&a.date));
 
@@ -1181,7 +1188,7 @@ end
 
     #[test]
     fn test_versions_same_timestamp_stable_sort() {
-        let mut versions = vec![
+        let mut versions = [
             create_test_version("first", "2025-01-15 00:00:00 UTC"),
             create_test_version("second", "2025-01-15 00:00:00 UTC"),
             create_test_version("third", "2025-01-15 00:00:00 UTC"),

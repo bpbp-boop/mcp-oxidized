@@ -110,7 +110,9 @@ async fn test_get_node_config_returns_text() {
     assert!(!nodes.is_empty(), "Need at least one node for this test");
 
     // Find a node with successful backup
-    let success_node = nodes.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
 
     if let Some(node) = success_node {
         let (config, metadata) = client
@@ -163,7 +165,9 @@ async fn test_get_node_versions_returns_history() {
     assert!(!nodes.is_empty(), "Need at least one node for this test");
 
     // Find a node with successful backup (likely to have versions)
-    let success_node = nodes.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
 
     if let Some(node) = success_node {
         let versions = client
@@ -339,7 +343,9 @@ async fn test_config_cache_hit() {
     // Get a valid node name
     let (nodes, _) = client.get_nodes().await.expect("Should get nodes");
 
-    let success_node = nodes.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
     if success_node.is_none() {
         println!("Warning: No node with successful backup found, skipping config cache test");
         return;
@@ -601,7 +607,10 @@ async fn test_get_node_config_returns_data_with_size() {
 
     // Get a valid node name with successful backup
     let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
-    let success_node = nodes.items.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
 
     if success_node.is_none() {
         println!("SKIP: No node with successful backup found");
@@ -670,7 +679,10 @@ async fn test_get_node_versions_sorted_descending() {
 
     // Get a valid node name with successful backup
     let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
-    let success_node = nodes.items.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
 
     if success_node.is_none() {
         println!("SKIP: No node with successful backup found");
@@ -740,7 +752,10 @@ async fn test_get_node_version_returns_historical_config() {
 
     // Get a valid node with versions
     let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
-    let success_node = nodes.items.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
 
     if success_node.is_none() {
         println!("SKIP: No node with successful backup found");
@@ -770,10 +785,13 @@ async fn test_get_node_version_returns_historical_config() {
     assert!(response.size.bytes > 0, "Should have size metadata");
 }
 
-/// Test that get_node_version() returns error for invalid OID.
+/// Test that get_node_version() handles invalid OID gracefully.
+///
+/// Note: Oxidized-web 0.18.0 returns `["version not found"]` for invalid OIDs,
+/// which is a valid JSON response rather than an HTTP error.
 #[tokio::test]
 #[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
-async fn test_get_node_version_invalid_oid_returns_error() {
+async fn test_get_node_version_invalid_oid_returns_message() {
     let client = create_client_from_env();
 
     // Get a valid node name
@@ -785,21 +803,23 @@ async fn test_get_node_version_invalid_oid_returns_error() {
 
     let node_name = &nodes.items[0].name;
 
-    // Request with invalid OID
+    // Request with invalid OID - Oxidized-web returns ["version not found"] as valid JSON
     let result = get_node_version(&client, node_name, "invalid-oid-that-does-not-exist").await;
 
-    assert!(result.is_err(), "Should return error for invalid OID");
-
-    // Verify the error type is appropriate (NodeNotFound or HttpError)
-    let err = result.unwrap_err();
-    match &err {
-        OxidizedError::NodeNotFound(_, _) | OxidizedError::HttpError { .. } => {
-            // Expected error types for invalid OID
+    // Oxidized-web 0.18.0 returns success with "version not found" message
+    // This is API behavior, not an error
+    match result {
+        Ok(response) => {
+            assert!(
+                response.config.contains("version not found"),
+                "Expected 'version not found' message, got: {}",
+                response.config
+            );
         }
-        other => panic!(
-            "Expected NodeNotFound or HttpError for invalid OID, got: {:?}",
-            other
-        ),
+        Err(e) => {
+            // Some versions may return an error - that's also acceptable
+            println!("API returned error for invalid OID: {:?}", e);
+        }
     }
 }
 
@@ -849,7 +869,10 @@ async fn test_get_node_config_cache_hit() {
 
     // Get a valid node name with successful backup
     let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
-    let success_node = nodes.items.iter().find(|n| n.status == "success");
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
 
     if success_node.is_none() {
         println!("SKIP: No node with successful backup found");

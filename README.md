@@ -4,6 +4,15 @@ MCP server for Oxidized network device configuration backup system.
 
 **Key Differentiator:** Actionable error messages optimized for LLM consumption.
 
+## Compatibility
+
+| Component | Version |
+|-----------|---------|
+| Oxidized (backend) | 0.35.0+ |
+| Oxidized-web (REST API) | 0.18.0+ |
+
+> **Note**: The REST API is provided by [oxidized-web](https://github.com/ytti/oxidized-web), a separate Ruby gem from Oxidized itself.
+
 ## Quick Start
 
 ### Installation

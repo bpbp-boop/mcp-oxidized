@@ -77,24 +77,46 @@ pub const RETRY_DELAYS_MS: [u64; 2] = [200, 800];
 // Data Models
 // ============================================================================
 
+/// Nested "last" backup information from Oxidized 0.35.0.
+///
+/// This nested object is present in both `/nodes.json` and `/node/show/{name}.json`
+/// responses and contains detailed timing information about the last backup run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastBackup {
+    /// Start timestamp of the backup
+    pub start: Option<String>,
+    /// End timestamp of the backup
+    pub end: Option<String>,
+    /// Status of the last backup
+    pub status: Option<String>,
+    /// Duration in seconds
+    pub time: Option<f64>,
+}
+
 /// Represents a network device node in Oxidized inventory.
 ///
 /// Contains metadata about the device including its name, IP address,
 /// group classification, and backup status.
 ///
-/// # Example JSON
+/// # Oxidized 0.35.0 Compatibility
+///
+/// - `/nodes.json` includes `status` and `time` at top level
+/// - `/node/show/{name}.json` does NOT include these; they're only in the nested `last` object
+/// - The `last_status` field is not present in Oxidized 0.35.0
+///
+/// # Example JSON from /nodes.json
 ///
 /// ```json
 /// {
 ///   "name": "SW-Core-01",
-///   "full_name": "SW-Core-01.network.local",
+///   "full_name": "group/SW-Core-01",
 ///   "ip": "192.168.1.1",
 ///   "group": "switches",
 ///   "model": "cisco-ios",
 ///   "status": "success",
-///   "last_status": "success",
 ///   "time": "2025-01-15 10:30:00 UTC",
-///   "mtime": "2025-01-15 10:25:00 UTC"
+///   "mtime": "2025-01-15 10:25:00 UTC",
+///   "last": { "start": "...", "end": "...", "status": "success", "time": 1.5 }
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,26 +132,72 @@ pub struct Node {
     /// Device model/platform (e.g., "cisco-ios", "junos")
     pub model: String,
     /// Current backup status (e.g., "success", "failure", "never")
-    pub status: String,
-    /// Previous backup status
-    pub last_status: String,
+    /// Note: Optional because /node/show/{name}.json doesn't include this field
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Previous backup status (optional, not present in Oxidized 0.35.0+)
+    #[serde(default)]
+    pub last_status: Option<String>,
     /// Timestamp of last backup attempt
+    /// Note: Optional because /node/show/{name}.json doesn't include this field
     pub time: Option<String>,
     /// Timestamp of last configuration modification
     pub mtime: Option<String>,
+    /// Detailed last backup information (present in Oxidized 0.35.0+)
+    #[serde(default)]
+    pub last: Option<LastBackup>,
+}
+
+impl Node {
+    /// Get the effective status, preferring top-level status over last.status.
+    ///
+    /// For `/nodes.json` responses, `status` is at the top level.
+    /// For `/node/show/{name}.json` responses, it's only in `last.status`.
+    pub fn effective_status(&self) -> Option<&str> {
+        self.status
+            .as_deref()
+            .or_else(|| self.last.as_ref().and_then(|l| l.status.as_deref()))
+    }
+
+    /// Get the effective time, preferring top-level time over last.end.
+    pub fn effective_time(&self) -> Option<&str> {
+        self.time.as_deref().or_else(|| {
+            self.last
+                .as_ref()
+                .and_then(|l| l.end.as_deref().or(l.start.as_deref()))
+        })
+    }
+}
+
+/// Author information for a configuration version.
+///
+/// Oxidized 0.35.0+ returns author as an object with name, email, and time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionAuthor {
+    /// Author's name
+    pub name: String,
+    /// Author's email
+    pub email: String,
+    /// Commit timestamp
+    pub time: String,
 }
 
 /// Represents a configuration version in Oxidized Git repository.
 ///
 /// Each version corresponds to a Git commit containing a configuration snapshot.
 ///
-/// # Example JSON
+/// # Example JSON (Oxidized 0.35.0+)
 ///
 /// ```json
 /// {
 ///   "oid": "abc123def456",
 ///   "date": "2025-01-15 10:30:00 UTC",
-///   "author": "oxidized",
+///   "time": "2025-01-15 10:30:00 UTC",
+///   "author": {
+///     "name": "oxidized",
+///     "email": "oxidized@example.com",
+///     "time": "2025-01-15 10:30:00 UTC"
+///   },
 ///   "message": "update SW-Core-01"
 /// }
 /// ```
@@ -139,8 +207,11 @@ pub struct NodeVersion {
     pub oid: String,
     /// Commit timestamp
     pub date: String,
-    /// Commit author
-    pub author: String,
+    /// Commit timestamp (duplicate of date in Oxidized 0.35.0+)
+    #[serde(default)]
+    pub time: Option<String>,
+    /// Commit author information
+    pub author: VersionAuthor,
     /// Commit message
     pub message: String,
 }
@@ -149,15 +220,16 @@ pub struct NodeVersion {
 ///
 /// Provides an overview of the backup system's health and activity.
 ///
-/// # Example JSON
+/// # Oxidized 0.35.0 Compatibility
 ///
-/// ```json
-/// {
-///   "total_nodes": 150,
-///   "success_count": 145,
-///   "failure_count": 5,
-///   "last_run": "2025-01-15 10:30:00 UTC"
-/// }
+/// Oxidized 0.35.0 does not expose a `/stats` JSON endpoint. Statistics are
+/// computed from the nodes list by counting `status` field values.
+///
+/// # Example
+///
+/// ```ignore
+/// let stats = Stats::from_nodes(&nodes);
+/// println!("Total: {}, Success: {}", stats.total_nodes.unwrap(), stats.success_count.unwrap());
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
@@ -169,6 +241,49 @@ pub struct Stats {
     pub failure_count: Option<u32>,
     /// Timestamp of last backup run
     pub last_run: Option<String>,
+}
+
+impl Stats {
+    /// Compute statistics from a list of nodes.
+    ///
+    /// This is used as the primary method for Oxidized 0.35.0 since it does not
+    /// expose a `/stats` endpoint. Statistics are computed by counting nodes
+    /// by their `status` field.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - Slice of nodes to compute statistics from
+    ///
+    /// # Returns
+    ///
+    /// A `Stats` struct with computed values:
+    /// - `total_nodes`: Total number of nodes
+    /// - `success_count`: Nodes with status "success"
+    /// - `failure_count`: Nodes with status other than "success" (including "never", "failure", etc.)
+    /// - `last_run`: Most recent `time` value from any node
+    pub fn from_nodes(nodes: &[Node]) -> Self {
+        let total = nodes.len() as u32;
+        let success = nodes
+            .iter()
+            .filter(|n| n.effective_status() == Some("success"))
+            .count() as u32;
+        let failure = total - success;
+
+        // Find the most recent time from any node
+        let last_run = nodes
+            .iter()
+            .filter_map(|n| n.effective_time())
+            .filter(|t| *t != "never")
+            .max()
+            .map(String::from);
+
+        Stats {
+            total_nodes: Some(total),
+            success_count: Some(success),
+            failure_count: Some(failure),
+            last_run,
+        }
+    }
 }
 
 // ============================================================================
@@ -599,20 +714,6 @@ impl OxidizedClient {
             .header("Content-Type", "application/json")
     }
 
-    /// Build an authenticated PUT request to the given endpoint.
-    fn build_put_request(&self, endpoint: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let mut request = self.client.put(&url);
-
-        if let Some(auth) = &self.auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
-        }
-
-        request
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-    }
-
     /// Handle HTTP response and map errors appropriately.
     async fn handle_json_response<T: serde::de::DeserializeOwned>(
         &self,
@@ -622,9 +723,7 @@ impl OxidizedClient {
         let response = self.handle_request_error(response)?;
         let status = response.status();
 
-        self.check_status(status, context)?;
-
-        // Get response body first for error context
+        // Get response body first for error detection
         let body = response
             .text()
             .await
@@ -633,6 +732,14 @@ impl OxidizedClient {
                 attempt: 1,
                 last_success: None,
             })?;
+
+        // Check for Oxidized 0.35.0 NodeNotFound pattern in error responses
+        // This can come with HTTP 500 status when a node doesn't exist
+        if let Some(err) = self.check_node_not_found_body(&body, context) {
+            return Err(err);
+        }
+
+        self.check_status(status, context)?;
 
         serde_json::from_str::<T>(&body).map_err(|e| OxidizedError::ParseError {
             context: context.to_string(),
@@ -649,16 +756,24 @@ impl OxidizedClient {
         let response = self.handle_request_error(response)?;
         let status = response.status();
 
-        self.check_status(status, context)?;
-
-        response
+        // Get response body first for error detection
+        let body = response
             .text()
             .await
             .map_err(|e| OxidizedError::ApiUnreachable {
                 source: e,
                 attempt: 1,
                 last_success: None,
-            })
+            })?;
+
+        // Check for Oxidized 0.35.0 "unable to find" pattern in error responses
+        if let Some(err) = self.check_node_not_found_body(&body, context) {
+            return Err(err);
+        }
+
+        self.check_status(status, context)?;
+
+        Ok(body)
     }
 
     /// Handle HTTP response for empty responses (PUT/POST operations).
@@ -670,9 +785,70 @@ impl OxidizedClient {
         let response = self.handle_request_error(response)?;
         let status = response.status();
 
+        // Get response body for error detection (even for "empty" responses)
+        let body = response
+            .text()
+            .await
+            .map_err(|e| OxidizedError::ApiUnreachable {
+                source: e,
+                attempt: 1,
+                last_success: None,
+            })?;
+
+        // Check for Oxidized 0.35.0 "unable to find" pattern in error responses
+        if let Some(err) = self.check_node_not_found_body(&body, context) {
+            return Err(err);
+        }
+
         self.check_status(status, context)?;
 
         Ok(())
+    }
+
+    /// Check if response body contains Oxidized 0.35.0 NodeNotFound pattern.
+    ///
+    /// Oxidized 0.35.0 returns HTTP 500 with different formats depending on the Accept header:
+    /// - Without Accept: text/plain with "unable to find 'nodename'"
+    /// - With Accept: application/json: HTML page with "Oxidized::NodeNotFound at /path"
+    ///
+    /// This function detects both patterns.
+    fn check_node_not_found_body(&self, body: &str, context: &str) -> Option<OxidizedError> {
+        // Pattern 1: Plain text format "unable to find 'nodename'"
+        if body.contains("unable to find '") {
+            let node_name = body
+                .split("unable to find '")
+                .nth(1)
+                .and_then(|s| s.split('\'').next())
+                .unwrap_or(context);
+
+            return Some(OxidizedError::NodeNotFound(node_name.to_string(), vec![]));
+        }
+
+        // Pattern 2: HTML error page with "Oxidized::NodeNotFound at /node/show/NAME.json"
+        if body.contains("Oxidized::NodeNotFound at /node/") {
+            // Try to extract node name from the URL pattern
+            // Format: "Oxidized::NodeNotFound at /node/show/NODENAME.json</title>"
+            // After split on "at /node/": "show/NODENAME.json</title>..."
+            let node_name = body
+                .split("Oxidized::NodeNotFound at /node/")
+                .nth(1)
+                .and_then(|s| {
+                    // s = "show/NODENAME.json</title>..."
+                    // Find the .json and extract what's before it after the last /
+                    if let Some(json_pos) = s.find(".json") {
+                        let before_json = &s[..json_pos];
+                        // before_json = "show/NODENAME"
+                        before_json.rfind('/').map(|pos| &before_json[pos + 1..])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(context);
+
+            return Some(OxidizedError::NodeNotFound(node_name.to_string(), vec![]));
+        }
+
+        None
     }
 
     /// Convert reqwest errors to OxidizedError.
@@ -796,8 +972,12 @@ impl OxidizedBackend for OxidizedClient {
 
     #[instrument(skip(self), fields(url = %self.base_url, node = %name))]
     async fn get_node_versions(&self, name: &str) -> Result<Vec<NodeVersion>, OxidizedError> {
+        // Oxidized-web 0.18.0 requires node_full (group/name) for version endpoint
+        // First get the node to obtain its full_name (usually cached)
+        let (node, _) = self.get_node(name).await?;
+
         // Versions are not cached (historical data, rarely accessed repeatedly)
-        let endpoint = format!("/node/version?node={}", name);
+        let endpoint = format!("/node/version.json?node_full={}", node.full_name);
         self.execute_with_retry(|| async {
             let response = self.build_request(&endpoint).send().await;
             self.handle_json_response(response, name).await
@@ -807,14 +987,27 @@ impl OxidizedBackend for OxidizedClient {
 
     #[instrument(skip(self), fields(url = %self.base_url, node = %name, oid = %oid))]
     async fn get_node_version(&self, name: &str, oid: &str) -> Result<String, OxidizedError> {
+        // Oxidized-web 0.18.0 requires node and group as separate params
+        // First get the node to obtain its group (usually cached)
+        let (node, _) = self.get_node(name).await?;
+
         // Version content is not cached (point-in-time data)
-        let endpoint = format!("/node/version?node={}&oid={}", name, oid);
+        // API returns JSON array of lines: ["line1\n", "line2\n", ...]
+        let endpoint = format!(
+            "/node/version/view.json?node={}&group={}&oid={}",
+            name, node.group, oid
+        );
         let context = format!("{}@{}", name, oid);
-        self.execute_with_retry(|| async {
-            let response = self.build_request(&endpoint).send().await;
-            self.handle_text_response(response, &context).await
-        })
-        .await
+
+        let lines: Vec<String> = self
+            .execute_with_retry(|| async {
+                let response = self.build_request(&endpoint).send().await;
+                self.handle_json_response(response, &context).await
+            })
+            .await?;
+
+        // Join lines into a single string
+        Ok(lines.join(""))
     }
 
     #[instrument(skip(self), fields(url = %self.base_url))]
@@ -825,14 +1018,12 @@ impl OxidizedBackend for OxidizedClient {
             return Ok((cached, CacheMetadata::hit()));
         }
 
-        // Cache miss - fetch with retry
-        tracing::debug!("Cache miss for stats, fetching from API");
-        let stats: Stats = self
-            .execute_with_retry(|| async {
-                let response = self.build_request("/").send().await;
-                self.handle_json_response(response, "stats").await
-            })
-            .await?;
+        // Cache miss - compute stats from nodes list
+        // Note: Oxidized 0.35.0 does not expose a /stats JSON endpoint,
+        // so we compute statistics from the nodes list.
+        tracing::debug!("Cache miss for stats, computing from nodes list");
+        let (nodes, _) = self.get_nodes().await?;
+        let stats = Stats::from_nodes(&nodes);
 
         // Store in cache
         self.stats_cache.insert((), stats.clone()).await;
@@ -841,11 +1032,11 @@ impl OxidizedBackend for OxidizedClient {
 
     #[instrument(skip(self), fields(url = %self.base_url, node = %node))]
     async fn trigger_backup(&self, node: &str) -> Result<(), OxidizedError> {
-        // Write operation with retry
-        let endpoint = format!("/node/next/{}", node);
+        // Oxidized-web 0.18.0 uses GET /node/next/{name}.json to trigger backup
+        let endpoint = format!("/node/next/{}.json", node);
         let result = self
             .execute_with_retry(|| async {
-                let response = self.build_put_request(&endpoint).send().await;
+                let response = self.build_request(&endpoint).send().await;
                 self.handle_empty_response(response, node).await
             })
             .await;
@@ -860,11 +1051,11 @@ impl OxidizedBackend for OxidizedClient {
 
     #[instrument(skip(self), fields(url = %self.base_url, node = %node))]
     async fn prioritize_node(&self, node: &str) -> Result<(), OxidizedError> {
-        // Write operation with retry
-        let endpoint = format!("/node/next/{}", node);
+        // Oxidized-web 0.18.0 uses GET /node/next/{name}.json to prioritize node
+        let endpoint = format!("/node/next/{}.json", node);
         let result = self
             .execute_with_retry(|| async {
-                let response = self.build_put_request(&endpoint).send().await;
+                let response = self.build_request(&endpoint).send().await;
                 self.handle_empty_response(response, node).await
             })
             .await;
@@ -929,8 +1120,8 @@ mod tests {
         assert_eq!(node.ip, "192.168.1.1");
         assert_eq!(node.group, "switches");
         assert_eq!(node.model, "cisco-ios");
-        assert_eq!(node.status, "success");
-        assert_eq!(node.last_status, "success");
+        assert_eq!(node.status, Some("success".to_string()));
+        assert_eq!(node.last_status, Some("success".to_string()));
         assert_eq!(node.time, Some("2025-01-15 10:30:00 UTC".to_string()));
         assert_eq!(node.mtime, Some("2025-01-15 10:25:00 UTC".to_string()));
     }
@@ -956,11 +1147,44 @@ mod tests {
     }
 
     #[test]
+    fn test_node_deserialize_oxidized_035_format() {
+        // Oxidized 0.35.0 does not include last_status field
+        let json = r#"{
+            "name": "Palais-Tech",
+            "full_name": "mikrotik/Palais-Tech",
+            "ip": "10.255.42.25",
+            "group": "mikrotik",
+            "model": "RouterOS",
+            "status": "success",
+            "time": "2025-12-23 09:01:42 UTC",
+            "mtime": "2025-12-23 09:01:42 UTC"
+        }"#;
+
+        let node: Node =
+            serde_json::from_str(json).expect("Should deserialize Oxidized 0.35.0 Node");
+
+        assert_eq!(node.name, "Palais-Tech");
+        assert_eq!(node.full_name, "mikrotik/Palais-Tech");
+        assert_eq!(node.group, "mikrotik");
+        assert_eq!(node.model, "RouterOS");
+        assert_eq!(node.status, Some("success".to_string()));
+        // last_status should be None when not present in JSON
+        assert_eq!(node.last_status, None);
+        assert_eq!(node.time, Some("2025-12-23 09:01:42 UTC".to_string()));
+    }
+
+    #[test]
     fn test_node_version_deserialize() {
+        // Oxidized 0.35.0+ format with author as object
         let json = r#"{
             "oid": "abc123def456",
             "date": "2025-01-15 10:30:00 UTC",
-            "author": "oxidized",
+            "time": "2025-01-15 10:30:00 UTC",
+            "author": {
+                "name": "oxidized",
+                "email": "oxidized@example.com",
+                "time": "2025-01-15 10:30:00 UTC"
+            },
             "message": "update SW-Core-01"
         }"#;
 
@@ -969,7 +1193,9 @@ mod tests {
 
         assert_eq!(version.oid, "abc123def456");
         assert_eq!(version.date, "2025-01-15 10:30:00 UTC");
-        assert_eq!(version.author, "oxidized");
+        assert_eq!(version.time, Some("2025-01-15 10:30:00 UTC".to_string()));
+        assert_eq!(version.author.name, "oxidized");
+        assert_eq!(version.author.email, "oxidized@example.com");
         assert_eq!(version.message, "update SW-Core-01");
     }
 
@@ -1000,7 +1226,78 @@ mod tests {
 
         assert_eq!(stats.total_nodes, Some(10));
         assert_eq!(stats.success_count, None);
-        assert_eq!(stats.failure_count, None);
+    }
+
+    #[test]
+    fn test_stats_from_nodes() {
+        let nodes = vec![
+            Node {
+                name: "node1".to_string(),
+                full_name: "group/node1".to_string(),
+                ip: "10.0.0.1".to_string(),
+                group: "test".to_string(),
+                model: "cisco".to_string(),
+                status: Some("success".to_string()),
+                last_status: None,
+                time: Some("2025-12-23 09:01:42 UTC".to_string()),
+                mtime: None,
+                last: None,
+            },
+            Node {
+                name: "node2".to_string(),
+                full_name: "group/node2".to_string(),
+                ip: "10.0.0.2".to_string(),
+                group: "test".to_string(),
+                model: "cisco".to_string(),
+                status: Some("success".to_string()),
+                last_status: None,
+                time: Some("2025-12-23 09:00:00 UTC".to_string()),
+                mtime: None,
+                last: None,
+            },
+            Node {
+                name: "node3".to_string(),
+                full_name: "group/node3".to_string(),
+                ip: "10.0.0.3".to_string(),
+                group: "test".to_string(),
+                model: "cisco".to_string(),
+                status: Some("failure".to_string()),
+                last_status: None,
+                time: Some("2025-12-22 10:00:00 UTC".to_string()),
+                mtime: None,
+                last: None,
+            },
+            Node {
+                name: "node4".to_string(),
+                full_name: "group/node4".to_string(),
+                ip: "10.0.0.4".to_string(),
+                group: "test".to_string(),
+                model: "cisco".to_string(),
+                status: Some("never".to_string()),
+                last_status: None,
+                time: Some("never".to_string()),
+                mtime: None,
+                last: None,
+            },
+        ];
+
+        let stats = Stats::from_nodes(&nodes);
+
+        assert_eq!(stats.total_nodes, Some(4));
+        assert_eq!(stats.success_count, Some(2));
+        assert_eq!(stats.failure_count, Some(2)); // failure + never
+        // Most recent time (excluding "never")
+        assert_eq!(stats.last_run, Some("2025-12-23 09:01:42 UTC".to_string()));
+    }
+
+    #[test]
+    fn test_stats_from_nodes_empty() {
+        let nodes: Vec<Node> = vec![];
+        let stats = Stats::from_nodes(&nodes);
+
+        assert_eq!(stats.total_nodes, Some(0));
+        assert_eq!(stats.success_count, Some(0));
+        assert_eq!(stats.failure_count, Some(0));
         assert_eq!(stats.last_run, None);
     }
 
@@ -1083,6 +1380,71 @@ mod tests {
         match result.unwrap_err() {
             OxidizedError::NodeNotFound(name, _) => {
                 assert_eq!(name, "test-node");
+            }
+            _ => panic!("Expected NodeNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_check_node_not_found_body_oxidized_035() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+        };
+        let client = OxidizedClient::new(&config);
+
+        // Oxidized 0.35.0 error format
+        let body = "Oxidized::NodeNotFound: unable to find 'NONEXISTENT' (Oxidized::NodeNotFound)";
+        let result = client.check_node_not_found_body(body, "context");
+
+        assert!(result.is_some());
+        match result.unwrap() {
+            OxidizedError::NodeNotFound(name, _) => {
+                assert_eq!(name, "NONEXISTENT");
+            }
+            _ => panic!("Expected NodeNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_check_node_not_found_body_no_match() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+        };
+        let client = OxidizedClient::new(&config);
+
+        let body = r#"{"name": "SW-Core-01", "status": "success"}"#;
+        let result = client.check_node_not_found_body(body, "context");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_node_not_found_body_html_format() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+        };
+        let client = OxidizedClient::new(&config);
+
+        // HTML error page format from Oxidized 0.35.0 when Accept: application/json is sent
+        let body = r#"<!DOCTYPE html>
+<html>
+<head>
+  <title>Oxidized::NodeNotFound at /node/show/test-node-123.json</title>
+</head>
+<body>...</body>
+</html>"#;
+        let result = client.check_node_not_found_body(body, "context");
+
+        assert!(result.is_some());
+        match result.unwrap() {
+            OxidizedError::NodeNotFound(name, _) => {
+                assert_eq!(name, "test-node-123");
             }
             _ => panic!("Expected NodeNotFound error"),
         }
@@ -1198,7 +1560,7 @@ mod tests {
         assert_eq!(node.ip, "192.168.1.1");
         assert_eq!(node.group, "switches");
         assert_eq!(node.model, "cisco-ios");
-        assert_eq!(node.status, "success");
+        assert_eq!(node.status, Some("success".to_string()));
     }
 
     #[test]
@@ -1211,7 +1573,7 @@ mod tests {
         assert_eq!(nodes.len(), 5);
         assert_eq!(nodes[0].name, "SW-Core-01");
         assert_eq!(nodes[2].name, "RTR-Edge-01");
-        assert_eq!(nodes[2].status, "failure");
+        assert_eq!(nodes[2].status, Some("failure".to_string()));
         // Verify node without time/mtime (AP-Floor3-01)
         assert_eq!(nodes[4].name, "AP-Floor3-01");
         assert_eq!(nodes[4].time, None);
@@ -1240,7 +1602,8 @@ mod tests {
 
         assert_eq!(versions.len(), 5);
         assert_eq!(versions[0].oid, "abc123def456789012345678901234567890abcd");
-        assert_eq!(versions[0].author, "oxidized");
+        assert_eq!(versions[0].author.name, "oxidized");
+        assert_eq!(versions[0].author.email, "oxidized@example.com");
         assert!(versions[0].message.contains("SW-Core-01"));
     }
 
@@ -1317,6 +1680,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_timeout_constants_are_reasonable() {
         // Connect timeout should be shorter than request timeout
         assert!(
@@ -1461,10 +1825,11 @@ mod tests {
             ip: "10.0.0.1".to_string(),
             group: "switches".to_string(),
             model: "cisco".to_string(),
-            status: "success".to_string(),
-            last_status: "success".to_string(),
+            status: Some("success".to_string()),
+            last_status: Some("success".to_string()),
             time: None,
             mtime: None,
+            last: None,
         }];
         let cached = CachedNodes {
             nodes,
@@ -1703,10 +2068,11 @@ mod tests {
             ip: "10.0.0.1".to_string(),
             group: "test".to_string(),
             model: "test".to_string(),
-            status: "success".to_string(),
-            last_status: "success".to_string(),
+            status: Some("success".to_string()),
+            last_status: Some("success".to_string()),
             time: None,
             mtime: None,
+            last: None,
         };
         client
             .node_cache
@@ -1751,10 +2117,11 @@ mod tests {
             ip: "10.0.0.1".to_string(),
             group: "test".to_string(),
             model: "test".to_string(),
-            status: "success".to_string(),
-            last_status: "success".to_string(),
+            status: Some("success".to_string()),
+            last_status: Some("success".to_string()),
             time: None,
             mtime: None,
+            last: None,
         };
         let node2 = Node {
             name: "node2".to_string(),
@@ -1762,10 +2129,11 @@ mod tests {
             ip: "10.0.0.2".to_string(),
             group: "test".to_string(),
             model: "test".to_string(),
-            status: "success".to_string(),
-            last_status: "success".to_string(),
+            status: Some("success".to_string()),
+            last_status: Some("success".to_string()),
             time: None,
             mtime: None,
+            last: None,
         };
         client.node_cache.insert("node1".to_string(), node1).await;
         client.node_cache.insert("node2".to_string(), node2).await;
@@ -1800,10 +2168,11 @@ mod tests {
             ip: "10.0.0.1".to_string(),
             group: "test".to_string(),
             model: "test".to_string(),
-            status: "success".to_string(),
-            last_status: "success".to_string(),
+            status: Some("success".to_string()),
+            last_status: Some("success".to_string()),
             time: None,
             mtime: None,
+            last: None,
         };
         let stats = Stats {
             total_nodes: Some(10),
