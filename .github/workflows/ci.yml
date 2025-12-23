@@ -13,6 +13,11 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Test Strategy:
+    # - `cargo test` runs unit tests + E2E tests with wiremock mock server
+    # - Real API tests are marked `#[ignore]` and NOT run in CI
+    # - Real API tests require OXIDIZED_URL env var and a real Oxidized server
+    # - Run real API tests locally with: cargo test -- --ignored
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

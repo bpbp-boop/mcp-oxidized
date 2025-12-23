@@ -1,18 +1,36 @@
-//! Integration tests for OxidizedClient.
+//! Integration tests for OxidizedClient against a REAL Oxidized server.
 //!
-//! These tests require a real Oxidized server and are marked with `#[ignore]`.
+//! ⚠️ **IMPORTANT**: These tests require access to a real Oxidized server.
+//! All tests are marked with `#[ignore]` and will NOT run in CI.
+//!
+//! For CI testing without a real server, see `e2e_tests.rs` which uses a mock server.
+//!
+//! # Test Strategy
+//!
+//! | Test File | Server | Attribute | CI | Command |
+//! |-----------|--------|-----------|-----|---------|
+//! | `e2e_tests.rs` | Mock (wiremock) | None | ✅ | `cargo test` |
+//! | `integration_real_api.rs` | Real Oxidized | `#[ignore]` | ❌ | `cargo test -- --ignored` |
 //!
 //! # Environment Variables
 //!
-//! - `OXIDIZED_URL` - Required: Base URL of the Oxidized server
+//! - `OXIDIZED_URL` - Required: Base URL of the Oxidized server (e.g., `http://oxidized:8888`)
 //! - `OXIDIZED_USER` - Optional: Username for Basic Auth
 //! - `OXIDIZED_PASSWORD` - Optional: Password for Basic Auth
 //!
-//! # Running Tests
+//! # Running Real API Tests
 //!
 //! ```bash
+//! # Set environment variables
 //! export OXIDIZED_URL="http://oxidized.example.com:8888"
+//! export OXIDIZED_USER="admin"
+//! export OXIDIZED_PASSWORD="secret"
+//!
+//! # Run all real API tests
 //! cargo test -- --ignored
+//!
+//! # Run a specific test
+//! cargo test test_get_nodes_returns_list -- --ignored
 //! ```
 
 use mcp_oxidized::config::Config;

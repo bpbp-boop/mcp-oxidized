@@ -57,13 +57,15 @@ Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`
 | `oxidized://node/{name}/versions/{oid}` | Get specific historical version |
 | `oxidized://stats` | Global backup statistics |
 
-### Tools (3)
+### Tools (5)
 
 | Tool | Description |
 |------|-------------|
 | `fetch_node_config` | Trigger immediate backup of a node's configuration |
 | `prioritize_node` | Move a node to the front of the backup queue |
 | `reload_sources` | Reload Oxidized source inventory |
+| `diff_configs` | Compare two configuration versions (Myers/LCS algorithm) |
+| `search_configs` | Search regex patterns across all device configurations |
 
 ## Actionable Errors
 
@@ -80,16 +82,25 @@ When something goes wrong, mcp-oxidized provides structured error messages optim
 
 ### Running Tests
 
+The project uses a two-tier testing strategy:
+
+| Test Type | Server | Runs in CI | Command |
+|-----------|--------|------------|---------|
+| Unit + E2E | Mock (wiremock) | ✅ | `cargo test` |
+| Real API | Real Oxidized | ❌ | `cargo test -- --ignored` |
+
 ```bash
-# Run all unit tests
+# Run all tests (unit + E2E with mock server) - No external dependencies!
 cargo test
 
-# Run integration tests (requires real Oxidized server)
+# Run real API tests (requires real Oxidized server)
 export OXIDIZED_URL="http://your-oxidized-server:8888"
 export OXIDIZED_USER="admin"      # optional
 export OXIDIZED_PASSWORD="secret"  # optional
 cargo test -- --ignored
 ```
+
+> **Note for contributors:** You can run `cargo test` without any Oxidized server - the E2E tests use a mock server (wiremock).
 
 ### Code Quality
 

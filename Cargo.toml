@@ -22,6 +22,8 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 [dev-dependencies]
 serial_test = "3.2.0"
 tempfile = "3.23.0"
+urlencoding = "2.1.3"
+wiremock = "0.6.5"
 
 # The profile that 'dist' will build with
 [profile.dist]
