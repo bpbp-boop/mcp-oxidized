@@ -19,7 +19,8 @@ use mcp_oxidized::config::Config;
 use mcp_oxidized::error::OxidizedError;
 use mcp_oxidized::oxidized::{OxidizedBackend, OxidizedClient};
 use mcp_oxidized::resources::{
-    get_node, get_node_config, get_node_version, get_node_versions, get_stats, list_nodes,
+    ConfigWithOptionsResult, TruncationParams, get_node, get_node_config,
+    get_node_config_with_options, get_node_version, get_node_versions, get_stats, list_nodes,
 };
 
 /// Helper to create a client from environment variables.
@@ -1737,4 +1738,379 @@ async fn test_search_prefilter_intersection() {
         user_nodes.len(),
         search_result.total_matches
     );
+}
+
+// =============================================================================
+// Large Config Handling Tests (Story 2.4)
+// =============================================================================
+
+/// Test that get_node_config returns ConfigMetadata with is_oversized field (AC: 1).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_metadata_includes_is_oversized() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+    let result = get_node_config(&client, node_name).await;
+
+    assert!(result.is_ok(), "get_node_config should succeed");
+
+    let response = result.unwrap();
+
+    // Verify is_oversized field exists and is correct type
+    println!(
+        "Config size: {} bytes, {} lines, is_oversized: {}",
+        response.size.bytes, response.size.lines, response.size.is_oversized
+    );
+
+    // Verify size_warning logic
+    if response.size.is_oversized {
+        assert!(
+            response.size.size_warning.is_some(),
+            "Oversized config should have size_warning"
+        );
+        assert!(
+            response
+                .size
+                .size_warning
+                .as_ref()
+                .unwrap()
+                .contains("truncate=true"),
+            "Warning should mention truncate option"
+        );
+    } else {
+        assert!(
+            response.size.size_warning.is_none(),
+            "Non-oversized config should not have size_warning"
+        );
+    }
+}
+
+/// Test that get_node_config_with_options with summary=true returns ConfigSummary (AC: 4).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_with_options_summary_mode() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Request summary mode
+    let result = get_node_config_with_options(&client, node_name, None, true).await;
+
+    assert!(
+        result.is_ok(),
+        "get_node_config_with_options should succeed"
+    );
+
+    let response = result.unwrap();
+
+    // Verify we got a Summary variant
+    match response {
+        ConfigWithOptionsResult::Summary(summary_response) => {
+            println!(
+                "Summary: {} sections, {} lines, vendor: {}",
+                summary_response.summary.sections.len(),
+                summary_response.summary.total_lines,
+                summary_response.summary.vendor_hint
+            );
+
+            assert!(
+                summary_response.summary.total_lines > 0,
+                "Should have line count"
+            );
+
+            // Verify LLM format works
+            let llm_output = summary_response.summary.to_llm_format();
+            assert!(
+                llm_output.contains("### Configuration Summary"),
+                "LLM format should have header"
+            );
+        }
+        ConfigWithOptionsResult::Config(_) => {
+            panic!("Expected Summary variant, got Config");
+        }
+    }
+}
+
+/// Test that get_node_config_with_options with truncate=true truncates config (AC: 3).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_with_options_truncate_mode() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // First get full config to compare
+    let full_result = get_node_config(&client, node_name).await.unwrap();
+    let full_lines = full_result.size.lines;
+
+    // Only test truncation if config is large enough
+    if full_lines <= 15 {
+        println!(
+            "SKIP: Config only has {} lines, not enough for truncation test",
+            full_lines
+        );
+        return;
+    }
+
+    // Request truncate mode with small params (5 head, 5 tail)
+    let truncation = TruncationParams::new(true, Some(5), Some(5));
+    let result = get_node_config_with_options(&client, node_name, Some(truncation), false).await;
+
+    assert!(
+        result.is_ok(),
+        "get_node_config_with_options should succeed"
+    );
+
+    let response = result.unwrap();
+
+    match response {
+        ConfigWithOptionsResult::Config(config_response) => {
+            // The truncated config should contain the TRUNCATED marker
+            assert!(
+                config_response.config.contains("TRUNCATED"),
+                "Truncated config should contain TRUNCATED marker. Got {} chars.",
+                config_response.config.len()
+            );
+
+            // Original size metadata should be preserved
+            assert_eq!(
+                config_response.size.lines, full_lines,
+                "Size metadata should reflect original config"
+            );
+
+            println!(
+                "Truncation test passed: {} original lines, truncated to ~11 lines",
+                full_lines
+            );
+        }
+        ConfigWithOptionsResult::Summary(_) => {
+            panic!("Expected Config variant, got Summary");
+        }
+    }
+}
+
+/// Test that get_node_config_with_options without options returns full config (AC: 2).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_with_options_full_mode() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Request without truncation or summary
+    let result = get_node_config_with_options(&client, node_name, None, false).await;
+
+    assert!(
+        result.is_ok(),
+        "get_node_config_with_options should succeed"
+    );
+
+    let response = result.unwrap();
+
+    match response {
+        ConfigWithOptionsResult::Config(config_response) => {
+            // Full config should NOT contain TRUNCATED marker
+            assert!(
+                !config_response.config.contains("TRUNCATED"),
+                "Full config should not be truncated"
+            );
+
+            // Compare with regular get_node_config
+            let regular = get_node_config(&client, node_name).await.unwrap();
+            assert_eq!(
+                config_response.config, regular.config,
+                "Full config should match regular get_node_config"
+            );
+
+            println!(
+                "Full mode test passed: {} bytes, {} lines",
+                config_response.size.bytes, config_response.size.lines
+            );
+        }
+        ConfigWithOptionsResult::Summary(_) => {
+            panic!("Expected Config variant, got Summary");
+        }
+    }
+}
+
+/// Test that config summary detects network device vendor (AC: 4).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_summary_detects_vendor() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Request summary mode
+    let result = get_node_config_with_options(&client, node_name, None, true).await;
+
+    assert!(result.is_ok(), "Should succeed");
+
+    if let ConfigWithOptionsResult::Summary(summary) = result.unwrap() {
+        println!("Detected vendor: {}", summary.summary.vendor_hint);
+
+        // Vendor hint should be non-empty
+        assert!(
+            !summary.summary.vendor_hint.is_empty(),
+            "Vendor hint should not be empty"
+        );
+
+        // Should be one of the known vendor types or Unknown
+        let valid_hints = [
+            "Cisco IOS-style",
+            "Juniper JunOS-style",
+            "Cisco-like",
+            "Unknown vendor",
+        ];
+        assert!(
+            valid_hints.contains(&summary.summary.vendor_hint.as_str()),
+            "Vendor hint '{}' should be a known type",
+            summary.summary.vendor_hint
+        );
+    }
+}
+
+/// Test that config summary extracts section headers (AC: 4).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_summary_extracts_sections() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Request summary mode
+    let result = get_node_config_with_options(&client, node_name, None, true).await;
+
+    assert!(result.is_ok(), "Should succeed");
+
+    if let ConfigWithOptionsResult::Summary(summary) = result.unwrap() {
+        println!("Sections detected:");
+        for section in &summary.summary.sections {
+            println!("  - {}", section);
+        }
+
+        // Most network configs should have at least some sections
+        // (interface, hostname, vlan, etc.)
+        println!(
+            "Total sections: {}, Total lines: {}",
+            summary.summary.sections.len(),
+            summary.summary.total_lines
+        );
+
+        // Size metadata should be included
+        assert!(
+            summary.summary.size.bytes > 0,
+            "Should include size metadata"
+        );
+    }
+}
+
+/// Test that get_node_config_with_options returns NodeNotFound with suggestions (AC: 5).
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_config_with_options_not_found_has_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    let result = get_node_config_with_options(&client, &non_existent, None, false).await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+            println!(
+                "NodeNotFound correctly returned {} suggestions: {:?}",
+                suggestions.len(),
+                suggestions
+            );
+        }
+        other => panic!("Expected NodeNotFound, got: {:?}", other),
+    }
 }

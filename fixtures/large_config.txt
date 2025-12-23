@@ -1,0 +1,229 @@
+! Cisco IOS Configuration - Large Config Test Fixture
+! This file contains 200+ lines for testing large config handling
+!
+version 15.2
+hostname SW-Core-01
+!
+aaa new-model
+aaa authentication login default local
+aaa authorization exec default local
+!
+username admin privilege 15 secret 5 $1$xxxx$xxxxxxxxxxxxxxxxxxxxxx
+username readonly privilege 1 secret 5 $1$yyyy$yyyyyyyyyyyyyyyyyyyy
+!
+ip domain-name example.com
+ip name-server 8.8.8.8
+ip name-server 8.8.4.4
+!
+interface GigabitEthernet0/0
+ description Management Interface
+ ip address 10.0.0.1 255.255.255.0
+ no shutdown
+!
+interface GigabitEthernet0/1
+ description Uplink to Router
+ ip address 192.168.1.1 255.255.255.0
+ no shutdown
+!
+interface GigabitEthernet0/2
+ description Server VLAN 100
+ switchport mode access
+ switchport access vlan 100
+ no shutdown
+!
+interface GigabitEthernet0/3
+ description Server VLAN 100
+ switchport mode access
+ switchport access vlan 100
+ no shutdown
+!
+interface GigabitEthernet0/4
+ description Server VLAN 200
+ switchport mode access
+ switchport access vlan 200
+ no shutdown
+!
+interface GigabitEthernet0/5
+ description Server VLAN 200
+ switchport mode access
+ switchport access vlan 200
+ no shutdown
+!
+interface GigabitEthernet0/6
+ description Trunk to Distribution
+ switchport mode trunk
+ switchport trunk allowed vlan 100,200,300
+ no shutdown
+!
+interface GigabitEthernet0/7
+ description Trunk to Distribution
+ switchport mode trunk
+ switchport trunk allowed vlan 100,200,300
+ no shutdown
+!
+interface GigabitEthernet0/8
+ description User Access
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/9
+ description User Access
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/10
+ description User Access
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/11
+ description User Access
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/12
+ description User Access
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface Vlan1
+ no ip address
+ shutdown
+!
+interface Vlan100
+ description Server VLAN
+ ip address 10.100.0.1 255.255.255.0
+!
+interface Vlan200
+ description Database VLAN
+ ip address 10.200.0.1 255.255.255.0
+!
+interface Vlan300
+ description User VLAN
+ ip address 10.30.0.1 255.255.255.0
+!
+router ospf 1
+ router-id 10.0.0.1
+ network 10.0.0.0 0.0.0.255 area 0
+ network 10.100.0.0 0.0.0.255 area 0
+ network 10.200.0.0 0.0.0.255 area 0
+ network 10.30.0.0 0.0.0.255 area 0
+ passive-interface default
+ no passive-interface GigabitEthernet0/1
+!
+vlan 100
+ name Servers
+!
+vlan 200
+ name Databases
+!
+vlan 300
+ name Users
+!
+ip route 0.0.0.0 0.0.0.0 192.168.1.254
+!
+ip access-list extended ALLOW-ICMP
+ permit icmp any any
+!
+ip access-list extended BLOCK-RFC1918
+ deny ip 10.0.0.0 0.255.255.255 any
+ deny ip 172.16.0.0 0.15.255.255 any
+ deny ip 192.168.0.0 0.0.255.255 any
+ permit ip any any
+!
+snmp-server community public RO
+snmp-server community private RW
+snmp-server location Data Center Rack 1
+snmp-server contact admin@example.com
+!
+banner motd ^
+===============================================================================
+                     AUTHORIZED ACCESS ONLY
+ 
+This system is for the use of authorized users only. Individuals using
+this computer system without authority, or in excess of their authority,
+are subject to having all of their activities on this system monitored
+and recorded by system personnel.
+ 
+In the course of monitoring individuals improperly using this system, or
+in the course of system maintenance, the activities of authorized users
+may also be monitored.
+ 
+Anyone using this system expressly consents to such monitoring and is
+advised that if such monitoring reveals possible evidence of criminal
+activity, system personnel may provide the evidence of such monitoring
+to law enforcement officials.
+===============================================================================
+^
+!
+line con 0
+ logging synchronous
+ login local
+!
+line vty 0 4
+ login local
+ transport input ssh
+!
+line vty 5 15
+ login local
+ transport input ssh
+!
+ntp server 10.0.0.100
+ntp server 10.0.0.101
+!
+logging 10.0.0.200
+logging trap informational
+!
+! Additional interfaces for 200+ line test fixture
+!
+interface GigabitEthernet0/13
+ description User Access Port 13
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/14
+ description User Access Port 14
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/15
+ description User Access Port 15
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/16
+ description User Access Port 16
+ switchport mode access
+ switchport access vlan 300
+ spanning-tree portfast
+ no shutdown
+!
+interface GigabitEthernet0/17
+ description Trunk to Access Switch 1
+ switchport mode trunk
+ switchport trunk allowed vlan 100,200,300
+ no shutdown
+!
+interface GigabitEthernet0/18
+ description Trunk to Access Switch 2
+ switchport mode trunk
+ switchport trunk allowed vlan 100,200,300
+ no shutdown
+!
+end

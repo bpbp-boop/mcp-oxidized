@@ -3,6 +3,7 @@ use mcp_oxidized::error::{Actionable, OxidizedError};
 use mcp_oxidized::oxidized::OxidizedClient;
 use mcp_oxidized::resources;
 use mcp_oxidized::tools;
+use percent_encoding::percent_decode_str;
 use rmcp::model::{
     Annotated, CallToolRequestParam, CallToolResult, Content, ErrorCode, Implementation,
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParam,
@@ -18,6 +19,23 @@ use tracing::{error, info, instrument};
 use tracing_subscriber::{EnvFilter, fmt};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Decode a percent-encoded URI path segment to a node name.
+///
+/// Handles URL-encoded characters like `%20` (space), `%2F` (/), etc.
+/// Returns the decoded string, or the original if decoding fails.
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(decode_node_name("router%201"), "router 1");
+/// assert_eq!(decode_node_name("switch-core"), "switch-core");
+/// ```
+fn decode_node_name(encoded: &str) -> Cow<'_, str> {
+    percent_decode_str(encoded)
+        .decode_utf8()
+        .unwrap_or(Cow::Borrowed(encoded))
+}
 
 /// MCP server implementation for Oxidized network device backup system.
 ///
@@ -171,7 +189,11 @@ impl ServerHandler for OxidizedServer {
                         name: "node_config".to_string(),
                         title: Some("Node Configuration".to_string()),
                         description: Some(
-                            "Get the current configuration of a network device with size metadata"
+                            "Get the current configuration of a network device with size metadata. \
+                             Supports query parameters: truncate=true (preserve head+tail lines), \
+                             truncate_head=N (lines at start, default 500), truncate_tail=N (lines at end, default 100), \
+                             summary=true (return section summary instead of full config). \
+                             Example: oxidized://node/router1/config?truncate=true&truncate_head=100"
                                 .to_string(),
                         ),
                         mime_type: Some("application/json".to_string()),
@@ -277,12 +299,63 @@ impl ServerHandler for OxidizedServer {
                 // - {name}/versions -> version list
                 // - {name}/versions/{oid} -> specific version
 
-                if let Some(rest) = path.strip_suffix("/config") {
-                    // oxidized://node/{name}/config - Get node configuration
-                    let node_name = rest;
-                    let result = resources::get_node_config(&*client, node_name)
-                        .await
-                        .map_err(Self::to_mcp_error)?;
+                if path.contains("/config") {
+                    // oxidized://node/{name}/config?truncate=true&summary=false
+                    // Parse path and query params
+                    let (node_part, query_string) = if let Some(idx) = path.find('?') {
+                        (&path[..idx], Some(&path[idx + 1..]))
+                    } else {
+                        (path, None)
+                    };
+
+                    // Extract node name (remove /config suffix) and decode percent-encoding
+                    let node_name_encoded = node_part.strip_suffix("/config").ok_or_else(|| {
+                        McpError::new(
+                            ErrorCode::INVALID_PARAMS,
+                            "[Error] Invalid config path.\n\
+                             [Context] Expected format: oxidized://node/{name}/config\n\
+                             [Next Step] Provide a valid node name.",
+                            None,
+                        )
+                    })?;
+                    let node_name = decode_node_name(node_name_encoded);
+
+                    // Parse query parameters
+                    let mut truncate = false;
+                    let mut truncate_head: Option<usize> = None;
+                    let mut truncate_tail: Option<usize> = None;
+                    let mut summary = false;
+
+                    if let Some(qs) = query_string {
+                        for param in qs.split('&') {
+                            if let Some((key, value)) = param.split_once('=') {
+                                match key {
+                                    "truncate" => truncate = value == "true",
+                                    "truncate_head" => truncate_head = value.parse().ok(),
+                                    "truncate_tail" => truncate_tail = value.parse().ok(),
+                                    "summary" => summary = value == "true",
+                                    _ => {} // Ignore unknown params
+                                }
+                            }
+                        }
+                    }
+
+                    // Build truncation params if truncate=true
+                    let truncation = if truncate {
+                        Some(resources::TruncationParams::new(
+                            true,
+                            truncate_head,
+                            truncate_tail,
+                        ))
+                    } else {
+                        None
+                    };
+
+                    let result = resources::get_node_config_with_options(
+                        &*client, &node_name, truncation, summary,
+                    )
+                    .await
+                    .map_err(Self::to_mcp_error)?;
 
                     let json = serde_json::to_string_pretty(&result).map_err(|e| {
                         McpError::new(
@@ -304,9 +377,9 @@ impl ServerHandler for OxidizedServer {
                     // oxidized://node/{name}/versions/{oid} - Get specific version
                     let parts: Vec<&str> = path.splitn(3, '/').collect();
                     if parts.len() == 3 && parts[1] == "versions" {
-                        let node_name = parts[0];
+                        let node_name = decode_node_name(parts[0]);
                         let oid = parts[2];
-                        let result = resources::get_node_version(&*client, node_name, oid)
+                        let result = resources::get_node_version(&*client, &node_name, oid)
                             .await
                             .map_err(Self::to_mcp_error)?;
 
@@ -338,9 +411,10 @@ impl ServerHandler for OxidizedServer {
                             None,
                         ))
                     }
-                } else if let Some(node_name) = path.strip_suffix("/versions") {
+                } else if let Some(node_name_encoded) = path.strip_suffix("/versions") {
                     // oxidized://node/{name}/versions - Get version list
-                    let result = resources::get_node_versions(&*client, node_name)
+                    let node_name = decode_node_name(node_name_encoded);
+                    let result = resources::get_node_versions(&*client, &node_name)
                         .await
                         .map_err(Self::to_mcp_error)?;
 
@@ -362,8 +436,8 @@ impl ServerHandler for OxidizedServer {
                     })
                 } else if !path.contains('/') {
                     // oxidized://node/{name} - Get node details (no slashes in name)
-                    let node_name = path;
-                    let result = resources::get_node(&*client, node_name)
+                    let node_name = decode_node_name(path);
+                    let result = resources::get_node(&*client, &node_name)
                         .await
                         .map_err(Self::to_mcp_error)?;
 

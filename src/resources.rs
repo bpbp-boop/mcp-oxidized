@@ -74,6 +74,22 @@ pub const MAX_PAGE_SIZE: usize = 500;
 pub const MAX_SUGGESTIONS: usize = 5;
 
 // ============================================================================
+// Large Config Constants (FR38)
+// ============================================================================
+
+/// Size threshold in bytes for large config warning (100KB).
+pub const SIZE_THRESHOLD_BYTES: usize = 100_000;
+
+/// Token threshold for LLM context warning (~25,000 tokens).
+pub const TOKEN_THRESHOLD: usize = 25_000;
+
+/// Default number of lines to keep at head when truncating.
+pub const DEFAULT_TRUNCATE_HEAD: usize = 500;
+
+/// Default number of lines to keep at tail when truncating.
+pub const DEFAULT_TRUNCATE_TAIL: usize = 100;
+
+// ============================================================================
 // Pagination Types
 // ============================================================================
 
@@ -150,7 +166,8 @@ pub struct NodeResponse {
 /// Metadata about configuration size for LLM context awareness (FR42).
 ///
 /// Provides size information to help LLMs understand the scale of
-/// configuration data before processing it.
+/// configuration data before processing it. Includes oversized detection
+/// and warning messages for large configs (FR38, FR39).
 ///
 /// # Example
 ///
@@ -163,6 +180,7 @@ pub struct NodeResponse {
 /// assert_eq!(meta.lines, 3);
 /// assert!(meta.bytes > 0);
 /// assert_eq!(meta.estimated_tokens, meta.bytes / 4);
+/// assert!(!meta.is_oversized); // Small config
 /// ```
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigMetadata {
@@ -172,24 +190,272 @@ pub struct ConfigMetadata {
     pub lines: usize,
     /// Estimated token count (~4 chars per token).
     pub estimated_tokens: usize,
+    /// True if config exceeds SIZE_THRESHOLD_BYTES (FR38).
+    pub is_oversized: bool,
+    /// Warning message for oversized configs (FR39).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_warning: Option<String>,
 }
 
 impl ConfigMetadata {
     /// Calculate metadata for a configuration string.
     ///
     /// Token estimation uses a rough approximation of ~4 characters per token,
-    /// which is typical for network device configurations.
+    /// which is typical for network device configurations. Oversized detection
+    /// triggers when config exceeds SIZE_THRESHOLD_BYTES (100KB).
     pub fn from_config(config: &str) -> Self {
         let bytes = config.len();
         let lines = config.lines().count();
         // Token estimation: ~4 characters per token (rough approximation)
         let estimated_tokens = bytes / 4;
+        let is_oversized = bytes > SIZE_THRESHOLD_BYTES;
+
+        let size_warning = if is_oversized {
+            Some(format!(
+                "Configuration exceeds LLM context limits (est. {} tokens, {} bytes). \
+                Consider using truncate=true or summary=true.",
+                estimated_tokens, bytes
+            ))
+        } else {
+            None
+        };
 
         Self {
             bytes,
             lines,
             estimated_tokens,
+            is_oversized,
+            size_warning,
         }
+    }
+}
+
+// ============================================================================
+// Truncation Types and Functions (FR40)
+// ============================================================================
+
+/// Parameters for configuration truncation (FR40).
+///
+/// Specifies how to truncate large configurations while preserving
+/// both the beginning and end of the config.
+#[derive(Debug, Clone, Default)]
+pub struct TruncationParams {
+    /// Whether truncation is enabled.
+    pub enabled: bool,
+    /// Number of lines to keep at the beginning.
+    pub head: usize,
+    /// Number of lines to keep at the end.
+    pub tail: usize,
+}
+
+impl TruncationParams {
+    /// Create new truncation parameters with defaults.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether to enable truncation
+    /// * `head` - Lines to keep at beginning (default: 500)
+    /// * `tail` - Lines to keep at end (default: 100)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use mcp_oxidized::resources::TruncationParams;
+    ///
+    /// let params = TruncationParams::new(true, None, None);
+    /// assert!(params.enabled);
+    /// assert_eq!(params.head, 500);
+    /// assert_eq!(params.tail, 100);
+    /// ```
+    pub fn new(enabled: bool, head: Option<usize>, tail: Option<usize>) -> Self {
+        Self {
+            enabled,
+            head: head.unwrap_or(DEFAULT_TRUNCATE_HEAD),
+            tail: tail.unwrap_or(DEFAULT_TRUNCATE_TAIL),
+        }
+    }
+}
+
+/// Truncate a configuration, preserving head and tail lines (FR40).
+///
+/// If the configuration has fewer lines than `head + tail`, returns the
+/// original config unchanged. Otherwise, keeps the first `head` lines
+/// and last `tail` lines, with a marker indicating how many lines were omitted.
+///
+/// # Arguments
+///
+/// * `config` - The configuration text to truncate
+/// * `head` - Number of lines to keep at the beginning
+/// * `tail` - Number of lines to keep at the end
+///
+/// # Returns
+///
+/// Truncated config with marker, or original if no truncation needed.
+///
+/// # Example
+///
+/// ```
+/// use mcp_oxidized::resources::truncate_config;
+///
+/// let config = (0..1000).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+/// let truncated = truncate_config(&config, 5, 3);
+///
+/// assert!(truncated.contains("line 0"));
+/// assert!(truncated.contains("line 4"));
+/// assert!(truncated.contains("[TRUNCATED:"));
+/// assert!(truncated.contains("line 997"));
+/// assert!(truncated.contains("line 999"));
+/// ```
+pub fn truncate_config(config: &str, head: usize, tail: usize) -> String {
+    let lines: Vec<&str> = config.lines().collect();
+    let total = lines.len();
+
+    if total <= head + tail {
+        return config.to_string(); // No truncation needed
+    }
+
+    let omitted = total - head - tail;
+    let marker = format!("\n... [TRUNCATED: {} lines omitted] ...\n", omitted);
+
+    let head_part: String = lines[..head].join("\n");
+    let tail_part: String = lines[total - tail..].join("\n");
+
+    format!("{}{}{}", head_part, marker, tail_part)
+}
+
+// ============================================================================
+// Summary Extraction Types and Functions (FR41)
+// ============================================================================
+
+/// Summary of configuration structure for oversized configs (FR41).
+///
+/// Provides a high-level overview of a configuration without the full content,
+/// useful for understanding structure before requesting full or truncated config.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigSummary {
+    /// Section headers detected in the configuration.
+    pub sections: Vec<String>,
+    /// Total line count of the original configuration.
+    pub total_lines: usize,
+    /// Original config size metadata.
+    pub size: ConfigMetadata,
+    /// Hint about the detected vendor/format.
+    pub vendor_hint: String,
+}
+
+impl ConfigSummary {
+    /// Format the summary for LLM consumption.
+    ///
+    /// Returns a human-readable summary suitable for display.
+    pub fn to_llm_format(&self) -> String {
+        let mut output = String::new();
+        output.push_str("### Configuration Summary\n\n");
+        output.push_str(&format!("**Vendor:** {}\n", self.vendor_hint));
+        output.push_str(&format!("**Total Lines:** {}\n", self.total_lines));
+        output.push_str(&format!(
+            "**Size:** {} bytes (~{} tokens)\n\n",
+            self.size.bytes, self.size.estimated_tokens
+        ));
+
+        if self.size.is_oversized {
+            output.push_str(&format!(
+                "⚠️ **Warning:** {}\n\n",
+                self.size
+                    .size_warning
+                    .as_deref()
+                    .unwrap_or("Config is oversized")
+            ));
+        }
+
+        output.push_str("**Sections Detected:**\n");
+        for section in &self.sections {
+            output.push_str(&format!("- {}\n", section));
+        }
+
+        output
+    }
+}
+
+/// Extract section summary from configuration (FR41).
+///
+/// Identifies common network device section patterns for Cisco IOS,
+/// Juniper JunOS, and similar platforms. Returns a summary with
+/// detected sections and size metadata.
+///
+/// # Arguments
+///
+/// * `config` - The configuration text to analyze
+///
+/// # Returns
+///
+/// A `ConfigSummary` with detected sections and metadata.
+///
+/// # Example
+///
+/// ```
+/// use mcp_oxidized::resources::extract_config_summary;
+///
+/// let config = r#"hostname SW-Core-01
+/// !
+/// interface GigabitEthernet0/1
+///   ip address 10.0.0.1 255.255.255.0
+/// !
+/// router ospf 1
+///   network 10.0.0.0 0.0.0.255 area 0
+/// "#;
+///
+/// let summary = extract_config_summary(config);
+/// assert!(summary.sections.iter().any(|s| s.starts_with("interface")));
+/// assert!(summary.sections.iter().any(|s| s.starts_with("router")));
+/// ```
+pub fn extract_config_summary(config: &str) -> ConfigSummary {
+    use regex::Regex;
+    use std::collections::HashSet;
+
+    let lines: Vec<&str> = config.lines().collect();
+    let total_lines = lines.len();
+
+    // Regex patterns for common sections
+    // Cisco: interface, router, vlan, ip route, snmp-server, aaa, line, banner, hostname, version
+    // Juniper: system, interfaces, routing-options, protocols, security, policy-options, set
+    let section_pattern = Regex::new(
+        r"^(?:!?\s*)?(interface|router|vlan|ip route|snmp-server|aaa|line|banner|hostname|version|system|interfaces|routing-options|protocols|security|policy-options|set )\s*(.*)$"
+    ).expect("Valid regex");
+
+    let mut sections = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for line in &lines {
+        if let Some(caps) = section_pattern.captures(line) {
+            let section_type = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let section_name = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let key = format!("{} {}", section_type, section_name)
+                .trim()
+                .to_string();
+
+            if !seen.contains(&key) && !key.is_empty() {
+                seen.insert(key.clone());
+                sections.push(key);
+            }
+        }
+    }
+
+    // Detect vendor hint based on config patterns
+    let vendor_hint = if config.contains("show running-config") || config.contains("hostname ") {
+        "Cisco IOS-style".to_string()
+    } else if config.contains("set system") || config.contains("set interfaces") {
+        "Juniper JunOS-style".to_string()
+    } else if config.contains("interface ") {
+        "Cisco-like".to_string()
+    } else {
+        "Unknown vendor".to_string()
+    };
+
+    ConfigSummary {
+        sections,
+        total_lines,
+        size: ConfigMetadata::from_config(config),
+        vendor_hint,
     }
 }
 
@@ -504,6 +770,107 @@ pub async fn get_node_config<B: OxidizedBackend>(
     }
 }
 
+/// Result of config retrieval with options (FR38-FR42).
+///
+/// Represents different output formats based on requested options.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ConfigWithOptionsResult {
+    /// Full or truncated configuration.
+    Config(ConfigResponse),
+    /// Summary-only response.
+    Summary(ConfigSummaryResponse),
+}
+
+/// Response wrapper for config summary (FR41).
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigSummaryResponse {
+    /// The configuration summary.
+    pub summary: ConfigSummary,
+    /// Cache status metadata.
+    pub metadata: CacheMetadata,
+}
+
+/// Get configuration with advanced options (FR38-FR42).
+///
+/// Retrieves node configuration with support for truncation and summary modes.
+/// This is the primary function for handling large configurations.
+///
+/// # Arguments
+///
+/// * `backend` - The Oxidized backend to fetch config from
+/// * `name` - The node name to get configuration for
+/// * `truncation` - Optional truncation parameters
+/// * `summary_only` - If true, return summary instead of full config
+///
+/// # Returns
+///
+/// Either a `ConfigResponse` (full/truncated) or `ConfigSummaryResponse` (summary-only).
+///
+/// # Errors
+///
+/// - [`OxidizedError::NodeNotFound`] - Node does not exist (includes suggestions)
+/// - [`OxidizedError::ApiUnreachable`] - Network/connection error
+///
+/// # Example
+///
+/// ```ignore
+/// // Get with truncation
+/// let truncation = TruncationParams::new(true, Some(100), Some(50));
+/// let result = get_node_config_with_options(&client, "router1", Some(truncation), false).await?;
+///
+/// // Get summary only
+/// let result = get_node_config_with_options(&client, "router1", None, true).await?;
+/// ```
+#[instrument(skip(backend), fields(node = %name, truncate = ?truncation.as_ref().map(|t| t.enabled), summary = summary_only))]
+pub async fn get_node_config_with_options<B: OxidizedBackend>(
+    backend: &B,
+    name: &str,
+    truncation: Option<TruncationParams>,
+    summary_only: bool,
+) -> Result<ConfigWithOptionsResult, OxidizedError> {
+    match backend.get_node_config(name).await {
+        Ok((config, cache_meta)) => {
+            // Summary-only mode
+            if summary_only {
+                let summary = extract_config_summary(&config);
+                return Ok(ConfigWithOptionsResult::Summary(ConfigSummaryResponse {
+                    summary,
+                    metadata: cache_meta,
+                }));
+            }
+
+            // Apply truncation if enabled
+            let final_config = if let Some(ref params) = truncation {
+                if params.enabled {
+                    truncate_config(&config, params.head, params.tail)
+                } else {
+                    config.clone()
+                }
+            } else {
+                config.clone()
+            };
+
+            // Calculate metadata from ORIGINAL config for accurate size reporting
+            let size = ConfigMetadata::from_config(&config);
+
+            Ok(ConfigWithOptionsResult::Config(ConfigResponse {
+                config: final_config,
+                size,
+                metadata: cache_meta,
+            }))
+        }
+        Err(OxidizedError::NodeNotFound(node_name, _)) => {
+            let suggestions = match backend.get_nodes().await {
+                Ok((nodes, _)) => find_similar_nodes(&nodes, &node_name, MAX_SUGGESTIONS),
+                Err(_) => vec![],
+            };
+            Err(OxidizedError::NodeNotFound(node_name, suggestions))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Get version history for a node (FR6).
 ///
 /// Retrieves a list of configuration versions, sorted by date descending
@@ -643,6 +1010,30 @@ mod tests {
     #[test]
     fn test_max_suggestions_is_5() {
         assert_eq!(MAX_SUGGESTIONS, 5);
+    }
+
+    // -------------------------------------------------------------------------
+    // Large Config Constants Tests (FR38)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_size_threshold_bytes_is_100kb() {
+        assert_eq!(SIZE_THRESHOLD_BYTES, 100_000);
+    }
+
+    #[test]
+    fn test_token_threshold_is_25k() {
+        assert_eq!(TOKEN_THRESHOLD, 25_000);
+    }
+
+    #[test]
+    fn test_default_truncate_head_is_500() {
+        assert_eq!(DEFAULT_TRUNCATE_HEAD, 500);
+    }
+
+    #[test]
+    fn test_default_truncate_tail_is_100() {
+        assert_eq!(DEFAULT_TRUNCATE_TAIL, 100);
     }
 
     // -------------------------------------------------------------------------
@@ -1021,6 +1412,8 @@ mod tests {
         assert_eq!(meta.bytes, 0);
         assert_eq!(meta.lines, 0);
         assert_eq!(meta.estimated_tokens, 0);
+        assert!(!meta.is_oversized);
+        assert!(meta.size_warning.is_none());
     }
 
     #[test]
@@ -1030,6 +1423,8 @@ mod tests {
         assert_eq!(meta.bytes, 16);
         assert_eq!(meta.lines, 1);
         assert_eq!(meta.estimated_tokens, 4); // 16/4
+        assert!(!meta.is_oversized);
+        assert!(meta.size_warning.is_none());
     }
 
     #[test]
@@ -1040,6 +1435,8 @@ mod tests {
         assert_eq!(meta.lines, 3);
         assert!(meta.bytes > 0);
         assert_eq!(meta.estimated_tokens, meta.bytes / 4);
+        assert!(!meta.is_oversized);
+        assert!(meta.size_warning.is_none());
     }
 
     #[test]
@@ -1106,6 +1503,323 @@ end
             meta.estimated_tokens > 50,
             "Should have significant token count"
         );
+        assert!(!meta.is_oversized);
+        assert!(meta.size_warning.is_none());
+    }
+
+    #[test]
+    fn test_config_metadata_is_oversized_threshold() {
+        // Config at exactly threshold should NOT be oversized (uses > not >=)
+        let config_at_threshold = "a".repeat(SIZE_THRESHOLD_BYTES);
+        let meta = ConfigMetadata::from_config(&config_at_threshold);
+        assert!(!meta.is_oversized);
+        assert!(meta.size_warning.is_none());
+
+        // Config one byte over threshold SHOULD be oversized
+        let config_over_threshold = "a".repeat(SIZE_THRESHOLD_BYTES + 1);
+        let meta = ConfigMetadata::from_config(&config_over_threshold);
+        assert!(meta.is_oversized);
+        assert!(meta.size_warning.is_some());
+    }
+
+    #[test]
+    fn test_config_metadata_size_warning_message() {
+        // Create oversized config
+        let config = "a".repeat(SIZE_THRESHOLD_BYTES + 1);
+        let meta = ConfigMetadata::from_config(&config);
+
+        let warning = meta.size_warning.unwrap();
+        assert!(warning.contains("exceeds LLM context limits"));
+        assert!(warning.contains("truncate=true"));
+        assert!(warning.contains("summary=true"));
+        assert!(warning.contains(&meta.estimated_tokens.to_string()));
+        assert!(warning.contains(&meta.bytes.to_string()));
+    }
+
+    #[test]
+    fn test_config_metadata_serializes_without_warning_when_not_oversized() {
+        let meta = ConfigMetadata::from_config("small config");
+        let json = serde_json::to_string(&meta).expect("Should serialize");
+
+        // size_warning should be skipped when None (skip_serializing_if)
+        assert!(!json.contains("size_warning"));
+        assert!(json.contains("\"is_oversized\":false"));
+    }
+
+    #[test]
+    fn test_config_metadata_serializes_with_warning_when_oversized() {
+        let config = "a".repeat(SIZE_THRESHOLD_BYTES + 1);
+        let meta = ConfigMetadata::from_config(&config);
+        let json = serde_json::to_string(&meta).expect("Should serialize");
+
+        assert!(json.contains("\"is_oversized\":true"));
+        assert!(json.contains("\"size_warning\":"));
+        assert!(json.contains("truncate=true"));
+    }
+
+    // -------------------------------------------------------------------------
+    // TruncationParams Tests (FR40)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_truncation_params_defaults() {
+        let params = TruncationParams::new(true, None, None);
+        assert!(params.enabled);
+        assert_eq!(params.head, DEFAULT_TRUNCATE_HEAD);
+        assert_eq!(params.tail, DEFAULT_TRUNCATE_TAIL);
+    }
+
+    #[test]
+    fn test_truncation_params_custom_values() {
+        let params = TruncationParams::new(true, Some(100), Some(50));
+        assert!(params.enabled);
+        assert_eq!(params.head, 100);
+        assert_eq!(params.tail, 50);
+    }
+
+    #[test]
+    fn test_truncation_params_disabled() {
+        let params = TruncationParams::new(false, None, None);
+        assert!(!params.enabled);
+    }
+
+    // -------------------------------------------------------------------------
+    // truncate_config Tests (FR40)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_truncate_config_no_truncation_needed() {
+        // Config smaller than head + tail threshold
+        let config = "line 1\nline 2\nline 3";
+        let result = truncate_config(config, 5, 5);
+        assert_eq!(result, config); // No truncation
+    }
+
+    #[test]
+    fn test_truncate_config_exact_threshold() {
+        // Config with exactly head + tail lines should NOT be truncated
+        let config = (0..10)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_config(&config, 5, 5);
+        assert_eq!(result, config); // No truncation
+        assert!(!result.contains("TRUNCATED"));
+    }
+
+    #[test]
+    fn test_truncate_config_one_over_threshold() {
+        // Config with head + tail + 1 lines SHOULD be truncated
+        let config = (0..11)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_config(&config, 5, 5);
+
+        assert!(result.contains("TRUNCATED"));
+        assert!(result.contains("1 lines omitted"));
+    }
+
+    #[test]
+    fn test_truncate_config_preserves_head() {
+        let config = (0..100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_config(&config, 5, 3);
+
+        // First 5 lines should be preserved
+        assert!(result.contains("line 0"));
+        assert!(result.contains("line 4"));
+        // Line 5 should NOT be in head part
+        let parts: Vec<&str> = result.split("TRUNCATED").collect();
+        assert!(!parts[0].contains("line 5"));
+    }
+
+    #[test]
+    fn test_truncate_config_preserves_tail() {
+        let config = (0..100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_config(&config, 5, 3);
+
+        // Last 3 lines should be preserved
+        assert!(result.contains("line 97"));
+        assert!(result.contains("line 98"));
+        assert!(result.contains("line 99"));
+        // Line 96 should NOT be in tail part
+        let parts: Vec<&str> = result.split("TRUNCATED").collect();
+        assert!(!parts[1].contains("line 96"));
+    }
+
+    #[test]
+    fn test_truncate_config_marker_correct_count() {
+        let config = (0..100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_config(&config, 5, 3);
+
+        // 100 lines - 5 head - 3 tail = 92 omitted
+        assert!(result.contains("92 lines omitted"));
+    }
+
+    #[test]
+    fn test_truncate_config_empty_config() {
+        let result = truncate_config("", 5, 3);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_truncate_config_single_line() {
+        let result = truncate_config("single line", 5, 3);
+        assert_eq!(result, "single line");
+    }
+
+    #[test]
+    fn test_truncate_config_large_config() {
+        // Test with 1000 lines
+        let config = (0..1000)
+            .map(|i| format!("line {:04}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = truncate_config(&config, 500, 100);
+
+        // 1000 - 500 - 100 = 400 omitted
+        assert!(result.contains("400 lines omitted"));
+        assert!(result.contains("line 0000")); // First line
+        assert!(result.contains("line 0499")); // Last of head
+        assert!(result.contains("line 0900")); // First of tail
+        assert!(result.contains("line 0999")); // Last line
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigSummary Tests (FR41)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_config_summary_cisco_style() {
+        let config = r#"!
+hostname SW-Core-01
+!
+interface GigabitEthernet0/1
+  description Uplink to Router
+  ip address 192.168.1.1 255.255.255.0
+  no shutdown
+!
+interface GigabitEthernet0/2
+  description Server VLAN
+  switchport mode access
+  switchport access vlan 100
+!
+router ospf 1
+  network 10.0.0.0 0.0.0.255 area 0
+!
+vlan 100
+  name Servers
+!
+end
+"#;
+        let summary = extract_config_summary(config);
+
+        assert!(summary.sections.iter().any(|s| s.starts_with("hostname")));
+        assert!(summary.sections.iter().any(|s| s.starts_with("interface")));
+        assert!(summary.sections.iter().any(|s| s.starts_with("router")));
+        assert!(summary.sections.iter().any(|s| s.starts_with("vlan")));
+        assert_eq!(summary.vendor_hint, "Cisco IOS-style");
+        assert!(summary.total_lines > 0);
+    }
+
+    #[test]
+    fn test_extract_config_summary_juniper_style() {
+        let config = r#"set system host-name juniper-rtr
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24
+set routing-options static route 0.0.0.0/0 next-hop 10.0.0.254
+set protocols ospf area 0.0.0.0 interface ge-0/0/0.0
+set security zones security-zone trust interfaces ge-0/0/0.0
+"#;
+        let summary = extract_config_summary(config);
+
+        assert!(summary.sections.iter().any(|s| s.starts_with("set ")));
+        assert_eq!(summary.vendor_hint, "Juniper JunOS-style");
+    }
+
+    #[test]
+    fn test_extract_config_summary_deduplicates_sections() {
+        let config = r#"interface Ethernet1
+  no shutdown
+interface Ethernet2
+  no shutdown
+interface Ethernet3
+  no shutdown
+"#;
+        let summary = extract_config_summary(config);
+
+        // Should have 3 unique interface sections
+        let interface_count = summary
+            .sections
+            .iter()
+            .filter(|s| s.starts_with("interface"))
+            .count();
+        assert_eq!(interface_count, 3);
+    }
+
+    #[test]
+    fn test_extract_config_summary_empty_config() {
+        let summary = extract_config_summary("");
+
+        assert!(summary.sections.is_empty());
+        assert_eq!(summary.total_lines, 0);
+        assert_eq!(summary.vendor_hint, "Unknown vendor");
+    }
+
+    #[test]
+    fn test_extract_config_summary_no_sections() {
+        let config = "# Just a comment\n# Another comment\n";
+        let summary = extract_config_summary(config);
+
+        assert!(summary.sections.is_empty());
+        assert_eq!(summary.total_lines, 2);
+    }
+
+    #[test]
+    fn test_config_summary_to_llm_format() {
+        let config = r#"hostname test-router
+interface Ethernet1
+  ip address 10.0.0.1/24
+"#;
+        let summary = extract_config_summary(config);
+        let llm_output = summary.to_llm_format();
+
+        assert!(llm_output.contains("### Configuration Summary"));
+        assert!(llm_output.contains("**Vendor:**"));
+        assert!(llm_output.contains("**Total Lines:**"));
+        assert!(llm_output.contains("**Sections Detected:**"));
+        assert!(llm_output.contains("hostname"));
+        assert!(llm_output.contains("interface"));
+    }
+
+    #[test]
+    fn test_config_summary_serializes() {
+        let config = "hostname test\ninterface eth0\n";
+        let summary = extract_config_summary(config);
+        let json = serde_json::to_string(&summary).expect("Should serialize");
+
+        assert!(json.contains("\"sections\":"));
+        assert!(json.contains("\"total_lines\":"));
+        assert!(json.contains("\"vendor_hint\":"));
+        assert!(json.contains("\"size\":"));
+    }
+
+    #[test]
+    fn test_config_summary_includes_size_metadata() {
+        let config = "hostname test\n".repeat(100);
+        let summary = extract_config_summary(&config);
+
+        assert_eq!(summary.size.lines, 100);
+        assert!(summary.size.bytes > 0);
+        assert!(summary.size.estimated_tokens > 0);
     }
 
     // -------------------------------------------------------------------------
@@ -1125,6 +1839,148 @@ end
         assert!(json.contains("\"size\":"));
         assert!(json.contains("\"metadata\":"));
         assert!(json.contains("\"cache_hit\":true"));
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigSummaryResponse Tests (FR41)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_summary_response_serializes() {
+        let config = "hostname test\ninterface eth0\n";
+        let summary = extract_config_summary(config);
+        let response = ConfigSummaryResponse {
+            summary,
+            metadata: CacheMetadata::hit(),
+        };
+
+        let json = serde_json::to_string(&response).expect("Should serialize");
+        assert!(json.contains("\"summary\":"));
+        assert!(json.contains("\"metadata\":"));
+        assert!(json.contains("\"cache_hit\":true"));
+        assert!(json.contains("\"sections\":"));
+        assert!(json.contains("\"vendor_hint\":"));
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigWithOptionsResult Tests (FR38-FR42)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_with_options_result_config_variant_serializes() {
+        let response = ConfigResponse {
+            config: "hostname router1\n".to_string(),
+            size: ConfigMetadata::from_config("hostname router1\n"),
+            metadata: CacheMetadata::hit(),
+        };
+        let result = ConfigWithOptionsResult::Config(response);
+
+        let json = serde_json::to_string(&result).expect("Should serialize");
+        // Untagged enum - should serialize as inner type
+        assert!(json.contains("\"config\":"));
+        assert!(json.contains("\"size\":"));
+    }
+
+    #[test]
+    fn test_config_with_options_result_summary_variant_serializes() {
+        let config = "hostname test\ninterface eth0\n";
+        let summary = extract_config_summary(config);
+        let response = ConfigSummaryResponse {
+            summary,
+            metadata: CacheMetadata::miss(),
+        };
+        let result = ConfigWithOptionsResult::Summary(response);
+
+        let json = serde_json::to_string(&result).expect("Should serialize");
+        // Untagged enum - should serialize as inner type
+        assert!(json.contains("\"summary\":"));
+        assert!(json.contains("\"sections\":"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Large Config Fixture Test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_truncate_config_with_fixture() {
+        // Simulate reading fixture (200+ line Cisco config)
+        let config: String = (0..200)
+            .map(|i| {
+                if i == 0 {
+                    "hostname SW-Core-01".to_string()
+                } else if i < 20 {
+                    format!("interface GigabitEthernet0/{}", i)
+                } else if i < 50 {
+                    format!("  ip address 10.0.{}.1 255.255.255.0", i)
+                } else if i < 100 {
+                    format!("router ospf {}", i % 10)
+                } else if i < 150 {
+                    format!("vlan {}", i)
+                } else {
+                    format!("snmp-server community public{}", i)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Test truncation with default params
+        let truncated = truncate_config(&config, DEFAULT_TRUNCATE_HEAD, DEFAULT_TRUNCATE_TAIL);
+
+        // With 200 lines and 500 head + 100 tail, no truncation should occur
+        assert_eq!(truncated, config);
+
+        // Test with smaller params
+        let truncated = truncate_config(&config, 10, 5);
+        assert!(truncated.contains("TRUNCATED"));
+        assert!(truncated.contains("185 lines omitted")); // 200 - 10 - 5 = 185
+
+        // Verify head is preserved
+        assert!(truncated.contains("hostname SW-Core-01"));
+
+        // Verify tail is preserved
+        assert!(truncated.contains("snmp-server community public199"));
+    }
+
+    #[test]
+    fn test_extract_config_summary_with_fixture() {
+        // Simulate reading fixture (Cisco config)
+        let config = r#"hostname SW-Core-01
+!
+interface GigabitEthernet0/1
+  description Uplink
+interface GigabitEthernet0/2
+  description Server
+router ospf 1
+  network 10.0.0.0 area 0
+vlan 100
+  name Servers
+vlan 200
+  name Users
+snmp-server community public RO
+line con 0
+line vty 0 4
+"#;
+
+        let summary = extract_config_summary(config);
+
+        // Verify sections detected
+        assert!(summary.sections.iter().any(|s| s.starts_with("hostname")));
+        assert!(summary.sections.iter().any(|s| s.starts_with("interface")));
+        assert!(summary.sections.iter().any(|s| s.starts_with("router")));
+        assert!(summary.sections.iter().any(|s| s.starts_with("vlan")));
+        assert!(
+            summary
+                .sections
+                .iter()
+                .any(|s| s.starts_with("snmp-server"))
+        );
+        assert!(summary.sections.iter().any(|s| s.starts_with("line")));
+
+        // Verify vendor detection
+        assert_eq!(summary.vendor_hint, "Cisco IOS-style");
+
+        // Verify line count
+        assert!(summary.total_lines > 10);
     }
 
     // -------------------------------------------------------------------------
