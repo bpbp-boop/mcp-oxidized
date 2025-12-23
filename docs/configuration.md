@@ -48,7 +48,7 @@ export OXIDIZED_PASSWORD_FILE="/run/secrets/oxidized-password"
 
 Control SSL/TLS certificate verification for HTTPS connections. Default is `true` (certificates are verified).
 
-> **Note:** This setting only affects HTTPS URLs. For HTTP URLs (e.g., `http://localhost:8888`), this setting has no effect.
+> **Note:** This setting only affects HTTPS URLs. For HTTP URLs (e.g., `http://localhost:8888`), this setting is silently ignored because there is no SSL/TLS certificate to verify.
 
 ```bash
 # Disable certificate verification (not recommended for production)
