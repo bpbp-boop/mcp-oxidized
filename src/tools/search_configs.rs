@@ -721,7 +721,10 @@ mod tests {
 
         let error = OxidizedError::InvalidRegex("Empty pattern is not allowed".to_string());
         let msg = error.to_string();
-        assert!(msg.contains("Empty pattern"), "Error should mention empty pattern");
+        assert!(
+            msg.contains("Empty pattern"),
+            "Error should mention empty pattern"
+        );
     }
 
     // -------------------------------------------------------------------------
