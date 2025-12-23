@@ -17,9 +17,11 @@ use thiserror::Error;
 /// Configuration for mcp-oxidized server
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Oxidized server base URL (e.g., `http://localhost:8888`)
     pub oxidized_url: String,
+    /// Optional username for HTTP Basic Auth
     pub oxidized_user: Option<String>,
-    #[allow(dead_code)] // Will be used in Story 1.4 for HTTP authentication
+    /// Optional password for HTTP Basic Auth
     pub oxidized_password: Option<String>,
 }
 
@@ -35,7 +37,6 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
-    #[allow(dead_code)] // Reserved for future use
     #[error("Environment variable error: {0}")]
     EnvVarError(String),
 }

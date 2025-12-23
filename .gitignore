@@ -20,6 +20,9 @@ Thumbs.db
 # Test artifacts
 *.profraw
 
+# Coverage reports (cargo-tarpaulin)
+/coverage
+
 # BMAD workflow artifacts (development only)
 _bmad/
 _bmad-output/

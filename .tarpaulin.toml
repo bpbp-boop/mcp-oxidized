@@ -1,0 +1,25 @@
+# cargo-tarpaulin configuration
+# Run with: cargo tarpaulin
+# Platform: Linux x86_64 only (uses ptrace)
+
+[default]
+# Exclude test code from coverage measurement
+ignore-tests = true
+
+# Output formats (HTML for local viewing, Xml for CI)
+out = ["Html", "Xml"]
+
+# Output directory for reports
+output-dir = "coverage"
+
+# Timeout for test execution (long tests may need more time)
+timeout = "120s"
+
+# Only measure coverage for the main crate, not dependencies
+all-features = false
+
+# Skip files that are just re-exports or trivial
+exclude-files = [
+    "tests/*",
+    "fixtures/*",
+]

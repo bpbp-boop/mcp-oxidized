@@ -117,7 +117,6 @@ impl DiffResult {
     /// +  ip address 10.0.0.2 255.255.255.0
     /// +  description Updated link
     /// ```
-    /// ```
     pub fn to_llm_format(&self) -> String {
         let mut output = String::new();
 

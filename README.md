@@ -1,29 +1,45 @@
 # mcp-oxidized
 
-MCP server for Oxidized network device configuration backup system.
+[![CI](https://github.com/fxthiry/mcp-oxidized/actions/workflows/ci.yml/badge.svg)](https://github.com/fxthiry/mcp-oxidized/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/mcp-oxidized.svg)](https://crates.io/crates/mcp-oxidized)
+[![codecov](https://codecov.io/gh/fxthiry/mcp-oxidized/branch/main/graph/badge.svg)](https://codecov.io/gh/fxthiry/mcp-oxidized)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Key Differentiator:** Actionable error messages optimized for LLM consumption.
+> MCP server exposing Oxidized network configuration backups to AI assistants with **actionable error messages**.
 
-## Compatibility
+mcp-oxidized is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects AI assistants (Claude Desktop, Cursor, Zed, Windsurf) to your [Oxidized](https://github.com/ytti/oxidized) network device configuration backup system.
 
-| Component | Version |
-|-----------|---------|
-| Oxidized (backend) | 0.35.0+ |
-| Oxidized-web (REST API) | 0.18.0+ |
-
-> **Note**: The REST API is provided by [oxidized-web](https://github.com/ytti/oxidized-web), a separate Ruby gem from Oxidized itself.
+**Key Differentiator:** When something goes wrong, you get structured error messages that LLMs can understand and act upon - not cryptic stack traces.
 
 ## Quick Start
 
-### Installation
+Get up and running in less than 5 minutes:
 
-Download the latest binary from [Releases](https://github.com/fxthiry/mcp-oxidized/releases) or build from source:
+### 1. Prerequisites
+
+- **Oxidized 0.35.0+** with **oxidized-web 0.18.0+** running and accessible
+- An MCP-compatible client (Claude Desktop, Cursor, Zed, Windsurf)
+
+> **Note**: The REST API is provided by [oxidized-web](https://github.com/ytti/oxidized-web), a separate Ruby gem from Oxidized itself.
+
+### 2. Installation
+
+**Option A: Download binary** (recommended)
+
+Download the latest binary for your platform from [Releases](https://github.com/fxthiry/mcp-oxidized/releases).
+
+**Option B: Build from source**
 
 ```bash
+cargo install mcp-oxidized
+# or
+git clone https://github.com/fxthiry/mcp-oxidized.git
+cd mcp-oxidized
 cargo build --release
 ```
 
-### Configuration (Claude Desktop)
+### 3. Configuration
 
 Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`):
 
@@ -35,7 +51,7 @@ Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`
       "env": {
         "OXIDIZED_URL": "http://your-oxidized-server:8888",
         "OXIDIZED_USER": "admin",
-        "OXIDIZED_PASSWORD": "secret"
+        "OXIDIZED_PASSWORD": "your-password"
       }
     }
   }
@@ -44,28 +60,28 @@ Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`
 
 **Zero-config mode:** If no env vars are set, defaults to `http://localhost:8888` with no authentication.
 
-## Features
+For more configuration options, see [docs/configuration.md](docs/configuration.md).
 
-### Resources (6)
+## Tools
+
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `fetch_node_config` | `node` | Trigger immediate backup of a node's configuration |
+| `prioritize_node` | `node` | Move a node to the front of the backup queue |
+| `reload_sources` | _(none)_ | Reload Oxidized source inventory (new devices become available) |
+| `diff_configs` | `node`, `version1`, `version2` | Compare two configuration versions using Myers/LCS algorithm |
+| `search_configs` | `pattern`, `nodes?`, `case_sensitive?`, `limit?` | Search regex patterns across all device configurations |
+
+## Resources
 
 | Resource URI | Description |
 |--------------|-------------|
-| `oxidized://nodes` | List all network devices (paginated) |
-| `oxidized://node/{name}` | Get specific node details |
-| `oxidized://node/{name}/config` | Get current configuration with size metadata |
-| `oxidized://node/{name}/versions` | Get configuration version history |
-| `oxidized://node/{name}/versions/{oid}` | Get specific historical version |
+| `oxidized://nodes` | List all nodes with pagination (`offset`, `limit`, `group`) |
+| `oxidized://node/{name}` | Node details (model, status, last backup time) |
+| `oxidized://node/{name}/config` | Current configuration (with `truncate`, `summary` options for large configs) |
+| `oxidized://node/{name}/versions` | Configuration version history |
+| `oxidized://node/{name}/versions/{oid}` | Specific historical version content |
 | `oxidized://stats` | Global backup statistics |
-
-### Tools (5)
-
-| Tool | Description |
-|------|-------------|
-| `fetch_node_config` | Trigger immediate backup of a node's configuration |
-| `prioritize_node` | Move a node to the front of the backup queue |
-| `reload_sources` | Reload Oxidized source inventory |
-| `diff_configs` | Compare two configuration versions (Myers/LCS algorithm) |
-| `search_configs` | Search regex patterns across all device configurations |
 
 ## Actionable Errors
 
@@ -78,38 +94,31 @@ When something goes wrong, mcp-oxidized provides structured error messages optim
 [Next Step] Use 'oxidized://nodes' to list all available nodes.
 ```
 
-## Development
+This format helps LLMs understand what went wrong and suggest corrections automatically.
 
-### Running Tests
+## Example Usage
 
-The project uses a two-tier testing strategy:
+Ask your AI assistant:
 
-| Test Type | Server | Runs in CI | Command |
-|-----------|--------|------------|---------|
-| Unit + E2E | Mock (wiremock) | ✅ | `cargo test` |
-| Real API | Real Oxidized | ❌ | `cargo test -- --ignored` |
+- "List all network devices in Oxidized"
+- "Show me the configuration of router-core-01"
+- "Compare the last two versions of switch-access-02"
+- "Find all devices with SNMP community 'public' configured"
+- "Trigger a backup of firewall-edge-01 now"
 
-```bash
-# Run all tests (unit + E2E with mock server) - No external dependencies!
-cargo test
+---
 
-# Run real API tests (requires real Oxidized server)
-export OXIDIZED_URL="http://your-oxidized-server:8888"
-export OXIDIZED_USER="admin"      # optional
-export OXIDIZED_PASSWORD="secret"  # optional
-cargo test -- --ignored
-```
+## Contributing
 
-> **Note for contributors:** You can run `cargo test` without any Oxidized server - the E2E tests use a mock server (wiremock).
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and PR guidelines.
 
-### Code Quality
+## Documentation
 
-```bash
-cargo fmt --check  # Check formatting
-cargo clippy       # Run linter
-cargo build        # Build project
-```
+- [Tools Reference](docs/tools.md) - Detailed tool documentation with examples
+- [Resources Reference](docs/resources.md) - Resource URI patterns and response formats
+- [Configuration Guide](docs/configuration.md) - All environment variables and options
+- [Troubleshooting](docs/troubleshooting.md) - Common errors and solutions
 
 ## License
 
-MIT
+Apache License 2.0 - see [LICENSE](LICENSE) for details.
