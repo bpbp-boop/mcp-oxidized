@@ -660,8 +660,18 @@ async fn main() {
     info!("Tools available: fetch_node_config, prioritize_node, reload_sources");
 
     // Run the server with stdio transport
-    if let Err(e) = server.serve(rmcp::transport::stdio()).await {
-        error!("Server error: {}", e);
+    // The serve() call returns a running service that we must keep alive with waiting()
+    let service = match server.serve(rmcp::transport::stdio()).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Server error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Wait for the service to complete (keeps the connection alive)
+    if let Err(e) = service.waiting().await {
+        error!("Service error: {}", e);
         std::process::exit(1);
     }
 
