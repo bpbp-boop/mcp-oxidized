@@ -3,7 +3,13 @@ name = "mcp-oxidized"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "MCP server for Oxidized network device configuration backup system"
 repository = "https://github.com/fxthiry/mcp-oxidized"
+homepage = "https://github.com/fxthiry/mcp-oxidized"
+documentation = "https://docs.rs/mcp-oxidized"
+readme = "README.md"
+keywords = ["mcp", "oxidized", "network", "backup", "configuration"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 async-trait = "0.1.89"
