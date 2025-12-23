@@ -207,6 +207,24 @@ pub enum OxidizedError {
 // Actionable Implementation
 // ============================================================================
 
+impl OxidizedError {
+    /// Returns a short, safe error type name for logging.
+    ///
+    /// This method is designed for tracing output where we need a concise
+    /// error identifier that is safe to log (no credentials or sensitive data).
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            OxidizedError::NodeNotFound(_, _) => "NodeNotFound",
+            OxidizedError::ApiUnreachable { .. } => "ApiUnreachable",
+            OxidizedError::InvalidRegex(_) => "InvalidRegex",
+            OxidizedError::AuthFailed => "AuthFailed",
+            OxidizedError::ConfigError(_) => "ConfigError",
+            OxidizedError::ParseError { .. } => "ParseError",
+            OxidizedError::HttpError { .. } => "HttpError",
+        }
+    }
+}
+
 impl Actionable for OxidizedError {
     fn to_llm_message(&self) -> String {
         match self {
