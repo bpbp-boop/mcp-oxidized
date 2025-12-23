@@ -574,6 +574,8 @@ pub struct OxidizedClient {
     client: Client,
     base_url: String,
     auth: Option<BasicAuth>,
+    /// Custom HTTP headers to include in all requests (FR44)
+    custom_headers: Vec<(String, String)>,
     // Integrated caches (FR28, FR29, FR30)
     nodes_cache: Cache<(), Vec<Node>>,
     config_cache: Cache<String, String>,
@@ -596,9 +598,15 @@ impl OxidizedClient {
     /// Panics if the reqwest client cannot be built (extremely rare, indicates
     /// TLS backend issues).
     pub fn new(config: &Config) -> Self {
+        // Build HTTP client with SSL verification setting (FR43)
+        // Only apply danger_accept_invalid_certs for HTTPS URLs (no effect on HTTP)
+        let is_https = config.oxidized_url.starts_with("https://");
+        let skip_ssl_verify = is_https && !config.ssl_verify;
+
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+            .danger_accept_invalid_certs(skip_ssl_verify)
             .build()
             .expect("Failed to build HTTP client");
 
@@ -628,6 +636,7 @@ impl OxidizedClient {
             client,
             base_url: config.oxidized_url.clone(),
             auth,
+            custom_headers: config.custom_headers.clone(),
             nodes_cache,
             config_cache,
             stats_cache,
@@ -722,12 +731,27 @@ impl OxidizedClient {
     }
 
     /// Build an authenticated request to the given endpoint.
+    ///
+    /// Applies custom headers first, then Basic Auth only if no custom Authorization
+    /// header was provided (FR44, AC3: custom Authorization takes priority).
     fn build_request(&self, endpoint: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, endpoint);
         let mut request = self.client.get(&url);
 
+        // Apply custom headers first (may include Authorization)
+        for (name, value) in &self.custom_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+
+        // Only apply Basic Auth if no custom Authorization header was provided
         if let Some(auth) = &self.auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
+            let has_custom_auth = self
+                .custom_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"));
+            if !has_custom_auth {
+                request = request.basic_auth(&auth.username, Some(&auth.password));
+            }
         }
 
         request
@@ -827,12 +851,27 @@ impl OxidizedClient {
     }
 
     /// Build an authenticated POST request to the given endpoint.
+    ///
+    /// Applies custom headers first, then Basic Auth only if no custom Authorization
+    /// header was provided (FR44, AC3: custom Authorization takes priority).
     fn build_post_request(&self, endpoint: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", self.base_url, endpoint);
         let mut request = self.client.post(&url);
 
+        // Apply custom headers first (may include Authorization)
+        for (name, value) in &self.custom_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+
+        // Only apply Basic Auth if no custom Authorization header was provided
         if let Some(auth) = &self.auth {
-            request = request.basic_auth(&auth.username, Some(&auth.password));
+            let has_custom_auth = self
+                .custom_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"));
+            if !has_custom_auth {
+                request = request.basic_auth(&auth.username, Some(&auth.password));
+            }
         }
 
         request
@@ -1438,6 +1477,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
 
         let client = OxidizedClient::new(&config);
@@ -1452,6 +1493,8 @@ mod tests {
             oxidized_url: "https://oxidized.example.com".to_string(),
             oxidized_user: Some("admin".to_string()),
             oxidized_password: Some("secret".to_string()),
+            ssl_verify: true,
+            custom_headers: vec![],
         };
 
         let client = OxidizedClient::new(&config);
@@ -1466,6 +1509,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: Some("admin".to_string()),
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
 
         let client = OxidizedClient::new(&config);
@@ -1480,6 +1525,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: Some("secret".to_string()),
+            ssl_verify: true,
+            custom_headers: vec![],
         };
 
         let client = OxidizedClient::new(&config);
@@ -1498,6 +1545,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1518,6 +1567,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1540,6 +1591,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1555,6 +1608,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1583,6 +1638,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1601,6 +1658,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1619,6 +1678,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1744,6 +1805,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1768,6 +1831,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -1788,6 +1853,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2018,6 +2085,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2036,6 +2105,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2069,6 +2140,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2105,6 +2178,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2149,6 +2224,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2185,6 +2262,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2234,6 +2313,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2285,6 +2366,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2506,6 +2589,8 @@ mod tests {
             oxidized_url: "http://localhost:8888".to_string(),
             oxidized_user: None,
             oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
         };
         let client = OxidizedClient::new(&config);
 
@@ -2517,5 +2602,192 @@ mod tests {
             result.unwrap().is_empty(),
             "Empty pattern should return empty list"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // SSL Verification Tests (Story 4-1, AC1)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_client_applies_ssl_verify_false() {
+        let config = Config {
+            oxidized_url: "https://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: false,
+            custom_headers: vec![],
+        };
+
+        // Client should be created without panic (accepts invalid certs)
+        let client = OxidizedClient::new(&config);
+        assert_eq!(client.base_url, "https://localhost:8888");
+    }
+
+    #[test]
+    fn test_client_applies_ssl_verify_true() {
+        let config = Config {
+            oxidized_url: "https://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
+        };
+
+        // Client should be created with SSL verification enabled
+        let client = OxidizedClient::new(&config);
+        assert_eq!(client.base_url, "https://localhost:8888");
+    }
+
+    // -------------------------------------------------------------------------
+    // Custom Headers Tests (Story 4-1, AC2)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_client_stores_custom_headers() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![("X-Api-Key".to_string(), "secret123".to_string())],
+        };
+
+        let client = OxidizedClient::new(&config);
+        assert_eq!(client.custom_headers.len(), 1);
+        assert_eq!(client.custom_headers[0].0, "X-Api-Key");
+        assert_eq!(client.custom_headers[0].1, "secret123");
+    }
+
+    #[test]
+    fn test_client_stores_multiple_custom_headers() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![
+                ("X-Api-Key".to_string(), "secret123".to_string()),
+                ("X-Custom".to_string(), "value".to_string()),
+            ],
+        };
+
+        let client = OxidizedClient::new(&config);
+        assert_eq!(client.custom_headers.len(), 2);
+    }
+
+    #[test]
+    fn test_client_empty_custom_headers() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
+        };
+
+        let client = OxidizedClient::new(&config);
+        assert!(client.custom_headers.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Authorization Header Priority Tests (Story 4-1, AC3)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_client_with_auth_and_no_custom_auth() {
+        // Has basic auth credentials, no custom Authorization header
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: Some("admin".to_string()),
+            oxidized_password: Some("secret".to_string()),
+            ssl_verify: true,
+            custom_headers: vec![("X-Api-Key".to_string(), "apikey".to_string())],
+        };
+
+        let client = OxidizedClient::new(&config);
+
+        // Auth should be set (Basic Auth will be applied)
+        assert!(client.auth.is_some());
+        // Custom headers should not contain Authorization
+        assert!(
+            !client
+                .custom_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
+        );
+    }
+
+    #[test]
+    fn test_client_with_auth_and_custom_auth() {
+        // Has both basic auth credentials AND custom Authorization header
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: Some("admin".to_string()),
+            oxidized_password: Some("secret".to_string()),
+            ssl_verify: true,
+            custom_headers: vec![
+                ("Authorization".to_string(), "Bearer token123".to_string()),
+                ("X-Api-Key".to_string(), "apikey".to_string()),
+            ],
+        };
+
+        let client = OxidizedClient::new(&config);
+
+        // Auth is set but won't be used due to custom Authorization header
+        assert!(client.auth.is_some());
+        // Custom headers contain Authorization
+        assert!(
+            client
+                .custom_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
+        );
+    }
+
+    #[test]
+    fn test_client_with_custom_auth_case_insensitive() {
+        // Custom Authorization header with different case
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: Some("admin".to_string()),
+            oxidized_password: Some("secret".to_string()),
+            ssl_verify: true,
+            custom_headers: vec![("authorization".to_string(), "Bearer token".to_string())],
+        };
+
+        let client = OxidizedClient::new(&config);
+
+        // Verify case-insensitive check works
+        assert!(
+            client
+                .custom_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Combined Configuration Tests (Story 4-1, AC4)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_client_combined_ssl_and_headers() {
+        let config = Config {
+            oxidized_url: "https://oxidized.example.com".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: false,
+            custom_headers: vec![
+                ("X-Api-Key".to_string(), "secret".to_string()),
+                ("X-Custom".to_string(), "value".to_string()),
+            ],
+        };
+
+        let client = OxidizedClient::new(&config);
+
+        // Both configurations should be applied
+        assert_eq!(client.base_url, "https://oxidized.example.com");
+        assert_eq!(client.custom_headers.len(), 2);
+        // Note: ssl_verify=false is applied at client builder level (can't directly verify)
     }
 }

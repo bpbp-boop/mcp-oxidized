@@ -256,22 +256,44 @@ impl Actionable for OxidizedError {
                     None => "No previous successful connection recorded.".to_string(),
                 };
 
-                let error_details = if source.is_timeout() {
-                    "Connection timed out."
+                // Detect SSL certificate errors for better suggestions
+                let error_string = source.to_string().to_lowercase();
+                let is_ssl_error = error_string.contains("certificate")
+                    || error_string.contains("ssl")
+                    || error_string.contains("tls")
+                    || error_string.contains("invalid peer certificate");
+
+                let (error_details, suggestion) = if is_ssl_error {
+                    (
+                        "SSL/TLS certificate verification failed.",
+                        "For self-signed certificates, set OXIDIZED_SSL_VERIFY=false. WARNING: Only do this if you trust the server.",
+                    )
+                } else if source.is_timeout() {
+                    (
+                        "Connection timed out.",
+                        "Check if Oxidized server is running and accessible. Verify OXIDIZED_URL configuration.",
+                    )
                 } else if source.is_connect() {
-                    "Connection refused or network unreachable."
+                    (
+                        "Connection refused or network unreachable.",
+                        "Check if Oxidized server is running and accessible. Verify OXIDIZED_URL configuration.",
+                    )
                 } else {
-                    "Network error occurred."
+                    (
+                        "Network error occurred.",
+                        "Check if Oxidized server is running and accessible. Verify OXIDIZED_URL configuration.",
+                    )
                 };
 
                 format!(
-                    "{} Oxidized API unreachable - {}.\n{} Attempt {}/3 to connect to Oxidized server. {}\n{} Check if Oxidized server is running and accessible. Verify OXIDIZED_URL configuration.\n{} Wait a moment and retry, or check network connectivity and server status.",
+                    "{} Oxidized API unreachable - {}\n{} Attempt {}/3 to connect to Oxidized server. {}\n{} {}\n{} Wait a moment and retry, or check network connectivity and server status.",
                     ERROR_PREFIX,
                     error_details,
                     CONTEXT_PREFIX,
                     attempt,
                     last_success_info,
                     SUGGESTIONS_PREFIX,
+                    suggestion,
                     NEXT_STEP_PREFIX
                 )
             }

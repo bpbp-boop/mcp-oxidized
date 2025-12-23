@@ -15,7 +15,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
 use std::borrow::Cow;
 use std::future::Future;
 use std::sync::Arc;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -901,6 +901,29 @@ async fn main() {
             } else {
                 info!("Authentication: disabled (zero-config mode)");
             }
+
+            // SSL verification warning (AC1) - only relevant for HTTPS
+            if cfg.oxidized_url.starts_with("https://") && !cfg.ssl_verify {
+                warn!("SSL certificate verification disabled");
+            }
+
+            // Custom headers info (AC2)
+            if !cfg.custom_headers.is_empty() {
+                info!(
+                    "Custom headers configured: {} header(s)",
+                    cfg.custom_headers.len()
+                );
+
+                // Authorization header priority warning (AC3)
+                let has_custom_auth = cfg
+                    .custom_headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"));
+                if has_custom_auth && cfg.oxidized_user.is_some() {
+                    warn!("Custom Authorization header overrides OXIDIZED_USER/PASSWORD");
+                }
+            }
+
             cfg
         }
         Err(e) => {

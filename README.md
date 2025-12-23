@@ -49,7 +49,7 @@ Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`
     "oxidized": {
       "command": "/path/to/mcp-oxidized",
       "env": {
-        "OXIDIZED_URL": "http://your-oxidized-server:8888",
+        "OXIDIZED_URL": "https://your-oxidized-server:8888",
         "OXIDIZED_USER": "admin",
         "OXIDIZED_PASSWORD": "your-password"
       }
@@ -59,6 +59,19 @@ Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`
 ```
 
 **Zero-config mode:** If no env vars are set, defaults to `http://localhost:8888` with no authentication.
+
+**Advanced options:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OXIDIZED_URL` | `http://localhost:8888` | Oxidized server URL |
+| `OXIDIZED_USER` | _(none)_ | Username for Basic Auth |
+| `OXIDIZED_PASSWORD` | _(none)_ | Password for Basic Auth |
+| `OXIDIZED_PASSWORD_FILE` | _(none)_ | File containing password (takes precedence) |
+| `OXIDIZED_SSL_VERIFY` | `true` | SSL certificate verification (`false` to disable) |
+| `OXIDIZED_HEADERS` | _(none)_ | Custom HTTP headers (`Header1:Value1,Header2:Value2`) |
+
+**Note:** Custom `Authorization` header in `OXIDIZED_HEADERS` takes precedence over Basic Auth credentials.
 
 For more configuration options, see [docs/configuration.md](docs/configuration.md).
 

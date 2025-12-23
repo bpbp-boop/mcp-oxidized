@@ -36,6 +36,8 @@ fn create_mock_client(mock_uri: &str) -> OxidizedClient {
         oxidized_url: mock_uri.to_string(),
         oxidized_user: None,
         oxidized_password: None,
+        ssl_verify: true,
+        custom_headers: vec![],
     };
     OxidizedClient::new(&config)
 }

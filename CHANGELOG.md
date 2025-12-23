@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SSL Verification Control** - New `OXIDIZED_SSL_VERIFY` environment variable to disable certificate verification for self-signed certificates (default: `true`, only affects HTTPS URLs)
+- **Custom HTTP Headers** - New `OXIDIZED_HEADERS` environment variable for adding custom headers to all requests (format: `Header1:Value1,Header2:Value2`)
+- Custom `Authorization` header takes precedence over Basic Auth credentials
+- Startup warnings when SSL verification is disabled or custom Authorization overrides Basic Auth
+- Improved error messages for SSL certificate failures with actionable suggestion to set `OXIDIZED_SSL_VERIFY=false`
+
 ## [1.0.1] - 2025-12-23
 
 ### Fixed

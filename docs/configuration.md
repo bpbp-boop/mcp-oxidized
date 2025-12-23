@@ -10,6 +10,8 @@ This document describes all configuration options for mcp-oxidized.
 | `OXIDIZED_USER` | No | _(none)_ | Username for Basic Auth |
 | `OXIDIZED_PASSWORD` | No | _(none)_ | Password for Basic Auth |
 | `OXIDIZED_PASSWORD_FILE` | No | _(none)_ | Path to file containing password |
+| `OXIDIZED_SSL_VERIFY` | No | `true` | SSL certificate verification |
+| `OXIDIZED_HEADERS` | No | _(none)_ | Custom HTTP headers |
 
 ### OXIDIZED_URL
 
@@ -41,6 +43,60 @@ export OXIDIZED_PASSWORD_FILE="/run/secrets/oxidized-password"
 ```
 
 **Precedence:** If both `OXIDIZED_PASSWORD` and `OXIDIZED_PASSWORD_FILE` are set, `OXIDIZED_PASSWORD_FILE` takes precedence.
+
+### OXIDIZED_SSL_VERIFY
+
+Control SSL/TLS certificate verification for HTTPS connections. Default is `true` (certificates are verified).
+
+> **Note:** This setting only affects HTTPS URLs. For HTTP URLs (e.g., `http://localhost:8888`), this setting has no effect.
+
+```bash
+# Disable certificate verification (not recommended for production)
+export OXIDIZED_SSL_VERIFY="false"
+```
+
+> **Security Warning:** Disabling SSL verification makes connections vulnerable to man-in-the-middle attacks. Only use `false` in development/testing environments or when connecting to servers with self-signed certificates that you trust.
+
+When disabled with an HTTPS URL, mcp-oxidized logs a warning at startup:
+```
+WARN mcp_oxidized: SSL certificate verification disabled
+```
+
+If a connection fails due to SSL certificate issues, the error message will suggest setting `OXIDIZED_SSL_VERIFY=false`.
+
+### OXIDIZED_HEADERS
+
+Add custom HTTP headers to all requests. Useful for:
+- API gateways requiring custom authentication
+- Proxy authentication
+- Custom request identification
+
+**Format:** Comma-separated `Header:Value` pairs.
+
+```bash
+export OXIDIZED_HEADERS="X-Api-Key:your-api-key,X-Custom:value"
+```
+
+**Advanced: Authorization Header**
+
+If you provide a custom `Authorization` header, it takes precedence over Basic Auth credentials:
+
+```bash
+# This Bearer token will be used instead of OXIDIZED_USER/PASSWORD
+export OXIDIZED_HEADERS="Authorization:Bearer your-token"
+export OXIDIZED_USER="admin"        # Ignored when custom Authorization is set
+export OXIDIZED_PASSWORD="secret"   # Ignored when custom Authorization is set
+```
+
+When both are configured, mcp-oxidized logs a warning:
+```
+WARN mcp_oxidized: Custom Authorization header overrides OXIDIZED_USER/PASSWORD
+```
+
+**Edge cases:**
+- Malformed headers are skipped with a warning
+- Empty values are allowed (`X-Empty:`)
+- Values can contain colons (`Authorization:Bearer token:with:colons`)
 
 ---
 

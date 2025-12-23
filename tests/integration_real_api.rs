@@ -42,14 +42,33 @@ use mcp_oxidized::resources::{
 };
 
 /// Helper to create a client from environment variables.
+///
+/// Supports environment variables:
+/// - `OXIDIZED_URL` - Required: Base URL of the Oxidized server
+/// - `OXIDIZED_USER` - Optional: Username for Basic Auth
+/// - `OXIDIZED_PASSWORD` - Optional: Password for Basic Auth
+/// - `OXIDIZED_SSL_VERIFY` - Optional: SSL verification (default: true)
+/// - `OXIDIZED_HEADERS` - Optional: Custom headers (format: Header1:Value1,Header2:Value2)
 fn create_client_from_env() -> OxidizedClient {
     let oxidized_url =
         std::env::var("OXIDIZED_URL").expect("OXIDIZED_URL required for integration tests");
+
+    // SSL verify - default true, accept "false" to disable
+    let ssl_verify = std::env::var("OXIDIZED_SSL_VERIFY")
+        .map(|v| !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+
+    // Parse custom headers from environment
+    let custom_headers = std::env::var("OXIDIZED_HEADERS")
+        .map(|raw| Config::parse_headers(&raw).unwrap_or_default())
+        .unwrap_or_default();
 
     let config = Config {
         oxidized_url,
         oxidized_user: std::env::var("OXIDIZED_USER").ok(),
         oxidized_password: std::env::var("OXIDIZED_PASSWORD").ok(),
+        ssl_verify,
+        custom_headers,
     };
 
     OxidizedClient::new(&config)
