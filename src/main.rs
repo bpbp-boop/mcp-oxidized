@@ -29,10 +29,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// - `oxidized://node/{name}/versions/{oid}` - Get specific version config (FR7)
 /// - `oxidized://stats` - Global statistics
 ///
-/// Provides tools for backup and queue management:
+/// Provides tools for backup, queue management, and configuration analysis:
 /// - `fetch_node_config` - Trigger immediate backup (FR15)
 /// - `prioritize_node` - Prioritize node in queue (FR16)
 /// - `reload_sources` - Reload source inventory (FR17)
+/// - `diff_configs` - Compare two configuration versions (FR9)
 #[derive(Clone)]
 struct OxidizedServer {
     client: Arc<OxidizedClient>,
@@ -491,6 +492,37 @@ impl ServerHandler for OxidizedServer {
                     icons: None,
                     meta: None,
                 },
+                Tool {
+                    name: Cow::Borrowed("diff_configs"),
+                    title: Some("Diff Configurations".to_string()),
+                    description: Some(Cow::Borrowed(
+                        "Compare two configuration versions of a node. \
+                         Returns a structured diff with additions, deletions, and modifications \
+                         in an LLM-friendly format.",
+                    )),
+                    input_schema: value_to_json_object(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "node": {
+                                "type": "string",
+                                "description": "The node name to compare configurations for"
+                            },
+                            "version1": {
+                                "type": "string",
+                                "description": "The first version OID (older version)"
+                            },
+                            "version2": {
+                                "type": "string",
+                                "description": "The second version OID (newer version)"
+                            }
+                        },
+                        "required": ["node", "version1", "version2"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
             ];
 
             Ok(ListToolsResult {
@@ -603,12 +635,69 @@ impl ServerHandler for OxidizedServer {
                         meta: None,
                     })
                 }
+                "diff_configs" => {
+                    let node = args
+                        .as_ref()
+                        .and_then(|a| a.get("node"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::new(
+                                ErrorCode::INVALID_PARAMS,
+                                "[Error] Missing required parameter 'node'.\n\
+                                 [Context] Tool 'diff_configs' requires a node name.\n\
+                                 [Next Step] Provide a valid node name parameter.",
+                                None,
+                            )
+                        })?;
+
+                    let version1 = args
+                        .as_ref()
+                        .and_then(|a| a.get("version1"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::new(
+                                ErrorCode::INVALID_PARAMS,
+                                "[Error] Missing required parameter 'version1'.\n\
+                                 [Context] Tool 'diff_configs' requires the first version OID.\n\
+                                 [Next Step] Provide a valid version1 OID parameter.",
+                                None,
+                            )
+                        })?;
+
+                    let version2 = args
+                        .as_ref()
+                        .and_then(|a| a.get("version2"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::new(
+                                ErrorCode::INVALID_PARAMS,
+                                "[Error] Missing required parameter 'version2'.\n\
+                                 [Context] Tool 'diff_configs' requires the second version OID.\n\
+                                 [Next Step] Provide a valid version2 OID parameter.",
+                                None,
+                            )
+                        })?;
+
+                    let result = tools::diff_configs(&client, node, version1, version2)
+                        .await
+                        .map_err(Self::to_mcp_error)?;
+
+                    // Return both the LLM-friendly format and the structured JSON
+                    let llm_output = result.to_llm_format();
+
+                    Ok(CallToolResult {
+                        content: vec![Content::text(llm_output)],
+                        structured_content: None,
+                        is_error: Some(false),
+                        meta: None,
+                    })
+                }
                 _ => Err(McpError::new(
                     ErrorCode::METHOD_NOT_FOUND,
                     format!(
                         "[Error] Unknown tool: '{}'\n\
                          [Context] Attempted to call a tool that does not exist.\n\
-                         [Suggestions] Available tools: fetch_node_config, prioritize_node, reload_sources\n\
+                         [Suggestions] Available tools: fetch_node_config, prioritize_node, reload_sources, diff_configs\n\
                          [Next Step] Use one of the available tool names.",
                         tool_name
                     ),
@@ -657,7 +746,7 @@ async fn main() {
     info!(
         "Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://node/{{name}}/config, oxidized://node/{{name}}/versions, oxidized://stats"
     );
-    info!("Tools available: fetch_node_config, prioritize_node, reload_sources");
+    info!("Tools available: fetch_node_config, prioritize_node, reload_sources, diff_configs");
 
     // Run the server with stdio transport
     // The serve() call returns a running service that we must keep alive with waiting()

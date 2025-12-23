@@ -1,9 +1,15 @@
 //! MCP Tools for Oxidized node operations.
 //!
-//! Tools are write operations that modify Oxidized state:
+//! Tools include both write operations that modify Oxidized state and
+//! read operations that provide enhanced analysis:
+//!
+//! **Write Operations:**
 //! - [`fetch_node_config`] - Trigger immediate backup (FR15)
 //! - [`prioritize_node`] - Prioritize node in queue (FR16)
 //! - [`reload_sources`] - Reload source inventory (FR17)
+//!
+//! **Analysis Operations:**
+//! - [`diff_configs`] - Compare two configuration versions (FR9)
 //!
 //! # Cache Invalidation Rule
 //!
@@ -38,10 +44,12 @@
 //! println!("{}", result.message);
 //! ```
 
+mod diff_configs;
 mod fetch_node_config;
 mod prioritize_node;
 mod reload_sources;
 
+pub use diff_configs::{DiffResult, diff_configs};
 pub use fetch_node_config::fetch_node_config;
 pub use prioritize_node::prioritize_node;
 pub use reload_sources::reload_sources;

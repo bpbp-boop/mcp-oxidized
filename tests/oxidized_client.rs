@@ -1049,3 +1049,221 @@ async fn test_reload_sources_reloads_inventory() {
         "Message should indicate sources were reloaded"
     );
 }
+
+// =============================================================================
+// Configuration Diff Tool Tests (Story 2.1)
+// =============================================================================
+
+/// Test that diff_configs compares two real versions successfully.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_diff_configs_compares_two_versions() {
+    let client = create_client_from_env();
+
+    // Get a node with at least 2 versions
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Get versions for this node
+    let versions = get_node_versions(&client, node_name).await;
+    if versions.is_err() {
+        println!("SKIP: Could not get versions for node {}", node_name);
+        return;
+    }
+
+    let versions = versions.unwrap();
+    if versions.versions.len() < 2 {
+        println!(
+            "SKIP: Node {} has only {} versions (need at least 2)",
+            node_name,
+            versions.versions.len()
+        );
+        return;
+    }
+
+    let version1 = &versions.versions[1].oid; // Older version
+    let version2 = &versions.versions[0].oid; // Newer version
+
+    let result = tools::diff_configs(&client, node_name, version1, version2).await;
+
+    assert!(result.is_ok(), "diff_configs should succeed");
+
+    let diff = result.unwrap();
+    assert_eq!(diff.node, *node_name, "Node name should match");
+    assert_eq!(diff.version1, *version1, "Version1 OID should match");
+    assert_eq!(diff.version2, *version2, "Version2 OID should match");
+
+    // Output LLM format for manual verification
+    println!("Diff result:\n{}", diff.to_llm_format());
+}
+
+/// Test that diff_configs returns identical=true for same version.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_diff_configs_identical_versions() {
+    let client = create_client_from_env();
+
+    // Get a node with at least 1 version
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Get versions for this node
+    let versions = get_node_versions(&client, node_name).await;
+    if versions.is_err() || versions.as_ref().unwrap().versions.is_empty() {
+        println!("SKIP: No versions available for node {}", node_name);
+        return;
+    }
+
+    let version = &versions.unwrap().versions[0].oid;
+
+    // Compare version with itself
+    let result = tools::diff_configs(&client, node_name, version, version).await;
+
+    assert!(result.is_ok(), "diff_configs should succeed");
+
+    let diff = result.unwrap();
+    assert!(
+        diff.identical,
+        "Same version compared with itself should be identical"
+    );
+    assert_eq!(diff.summary.lines_added, 0, "No lines should be added");
+    assert_eq!(diff.summary.lines_removed, 0, "No lines should be removed");
+    assert_eq!(
+        diff.summary.modification_blocks, 0,
+        "No modification blocks expected"
+    );
+
+    // Check LLM format mentions identical
+    let llm_output = diff.to_llm_format();
+    assert!(
+        llm_output.contains("identical"),
+        "LLM output should mention configs are identical"
+    );
+}
+
+/// Test that diff_configs returns NodeNotFound with suggestions for invalid node.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_diff_configs_node_not_found_has_suggestions() {
+    let client = create_client_from_env();
+
+    // Get a real node name to build similar-but-nonexistent name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let existing_name = &nodes.items[0].name;
+    let non_existent = format!("{}-NONEXISTENT-999", existing_name);
+
+    let result = tools::diff_configs(&client, &non_existent, "v1", "v2").await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent);
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions for similar nodes"
+            );
+            println!(
+                "NodeNotFound correctly returned {} suggestions: {:?}",
+                suggestions.len(),
+                suggestions
+            );
+        }
+        other => panic!("Expected NodeNotFound error, got: {:?}", other),
+    }
+}
+
+/// Test that diff_configs LLM format is structured correctly.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_diff_configs_llm_format_structure() {
+    let client = create_client_from_env();
+
+    // Get a node with at least 2 versions
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = &success_node.unwrap().name;
+
+    // Get versions for this node
+    let versions = get_node_versions(&client, node_name).await;
+    if versions.is_err() {
+        println!("SKIP: Could not get versions for node {}", node_name);
+        return;
+    }
+
+    let versions = versions.unwrap();
+    if versions.versions.len() < 2 {
+        println!("SKIP: Node {} needs at least 2 versions", node_name);
+        return;
+    }
+
+    let version1 = &versions.versions[1].oid;
+    let version2 = &versions.versions[0].oid;
+
+    let result = tools::diff_configs(&client, node_name, version1, version2).await;
+
+    assert!(result.is_ok(), "diff_configs should succeed");
+
+    let diff = result.unwrap();
+    let llm_output = diff.to_llm_format();
+
+    // Verify LLM format structure
+    assert!(
+        llm_output.contains("## Configuration Diff:"),
+        "Should have header"
+    );
+    assert!(
+        llm_output.contains("Comparing version"),
+        "Should mention versions being compared"
+    );
+
+    if !diff.identical {
+        assert!(llm_output.contains("### Summary"), "Should have summary");
+        assert!(
+            llm_output.contains("Lines added:"),
+            "Summary should have lines added"
+        );
+        assert!(
+            llm_output.contains("Lines removed:"),
+            "Summary should have lines removed"
+        );
+        assert!(
+            llm_output.contains("Modification blocks:"),
+            "Summary should have modification blocks"
+        );
+    }
+}
