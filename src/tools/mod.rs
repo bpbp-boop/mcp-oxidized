@@ -10,6 +10,7 @@
 //!
 //! **Analysis Operations:**
 //! - [`diff_configs`] - Compare two configuration versions (FR9)
+//! - [`search_configs`] - Search for patterns across configurations (FR10-FR13)
 //!
 //! # Cache Invalidation Rule
 //!
@@ -48,11 +49,13 @@ mod diff_configs;
 mod fetch_node_config;
 mod prioritize_node;
 mod reload_sources;
+mod search_configs;
 
 pub use diff_configs::{DiffResult, diff_configs};
 pub use fetch_node_config::fetch_node_config;
 pub use prioritize_node::prioritize_node;
 pub use reload_sources::reload_sources;
+pub use search_configs::{NodeMatches, SearchMatch, SearchResult, search_configs};
 
 use crate::error::OxidizedError;
 use crate::oxidized::{OxidizedBackend, OxidizedClient};

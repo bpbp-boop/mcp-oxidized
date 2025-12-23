@@ -549,6 +549,7 @@ impl BasicAuth {
 ///
 /// let nodes = client.get_nodes().await?;
 /// ```
+#[derive(Clone)]
 pub struct OxidizedClient {
     client: Client,
     base_url: String,

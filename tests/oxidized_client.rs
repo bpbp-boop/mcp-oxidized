@@ -1267,3 +1267,280 @@ async fn test_diff_configs_llm_format_structure() {
         );
     }
 }
+
+// =============================================================================
+// Configuration Search Tool Tests (Story 2.2)
+// =============================================================================
+
+/// Test that search_configs finds patterns in network device configurations.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_finds_patterns() {
+    let client = create_client_from_env();
+
+    // Search for a common pattern that should exist in most configs (hostname or version)
+    let result = tools::search_configs(&client, "hostname|version", None, false, 100).await;
+
+    assert!(result.is_ok(), "search_configs should succeed");
+
+    let search_result = result.unwrap();
+    println!(
+        "Search completed: {} matches found",
+        search_result.total_matches
+    );
+    println!("Nodes searched: {}", search_result.nodes_searched);
+    println!("Nodes with matches: {}", search_result.nodes_with_matches);
+
+    // We expect to find some matches in a real Oxidized setup
+    if search_result.nodes_searched > 0 && search_result.nodes_with_matches == 0 {
+        println!("Note: No matches found - this may be expected depending on config content");
+    }
+}
+
+/// Test that search_configs limits results correctly.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_respects_limit() {
+    let client = create_client_from_env();
+
+    // Search with a very low limit
+    let result = tools::search_configs(&client, ".*", None, true, 5).await;
+
+    assert!(result.is_ok(), "search_configs should succeed");
+
+    let search_result = result.unwrap();
+    assert!(
+        search_result.shown_matches <= 5,
+        "Should not show more than limit"
+    );
+
+    if search_result.total_matches > 5 {
+        assert!(
+            search_result.shown_matches < search_result.total_matches,
+            "Should truncate when total exceeds limit"
+        );
+    }
+}
+
+/// Test that search_configs filters by node list.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_filters_by_nodes() {
+    let client = create_client_from_env();
+
+    // Get a valid node name
+    let nodes = list_nodes(&client, None, Some(3), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let node_names: Vec<String> = nodes.items.iter().map(|n| n.name.clone()).collect();
+
+    // Search only in specific nodes
+    let result = tools::search_configs(
+        &client,
+        ".*", // Match anything
+        Some(node_names.clone()),
+        true,
+        100,
+    )
+    .await;
+
+    assert!(result.is_ok(), "search_configs should succeed");
+
+    let search_result = result.unwrap();
+    assert!(
+        search_result.nodes_searched <= node_names.len(),
+        "Should only search requested nodes"
+    );
+
+    // All results should be from requested nodes
+    for node_match in &search_result.results {
+        assert!(
+            node_names.contains(&node_match.node),
+            "Result node {} should be in requested list",
+            node_match.node
+        );
+    }
+}
+
+/// Test that search_configs handles invalid regex gracefully.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_invalid_regex_returns_error() {
+    let client = create_client_from_env();
+
+    // Use an invalid regex pattern
+    let result = tools::search_configs(&client, "[invalid(regex", None, true, 100).await;
+
+    assert!(result.is_err(), "Should return error for invalid regex");
+
+    match result.unwrap_err() {
+        OxidizedError::InvalidRegex(msg) => {
+            assert!(
+                msg.contains("invalid") || msg.contains("Invalid"),
+                "Error should mention invalid pattern"
+            );
+        }
+        other => panic!("Expected InvalidRegex error, got: {:?}", other),
+    }
+}
+
+/// Test that search_configs warns about non-existent nodes.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_warns_about_nonexistent_nodes() {
+    let client = create_client_from_env();
+
+    // Get a valid node name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory");
+        return;
+    }
+
+    let valid_node = nodes.items[0].name.clone();
+    let invalid_node = format!("{}-NONEXISTENT-999", valid_node);
+
+    // Search including non-existent node
+    let result = tools::search_configs(
+        &client,
+        ".*",
+        Some(vec![valid_node.clone(), invalid_node.clone()]),
+        true,
+        100,
+    )
+    .await;
+
+    assert!(result.is_ok(), "search_configs should succeed");
+
+    let search_result = result.unwrap();
+    assert!(
+        !search_result.warnings.is_empty(),
+        "Should have warnings about non-existent node"
+    );
+
+    let warning_about_invalid = search_result
+        .warnings
+        .iter()
+        .any(|w| w.contains(&invalid_node));
+    assert!(
+        warning_about_invalid,
+        "Warnings should mention the non-existent node"
+    );
+}
+
+/// Test that search_configs handles case-insensitive search.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_case_insensitive() {
+    let client = create_client_from_env();
+
+    // Search for uppercase pattern with case-insensitive flag
+    let result_insensitive = tools::search_configs(&client, "HOSTNAME", None, false, 100).await;
+    let result_sensitive = tools::search_configs(&client, "HOSTNAME", None, true, 100).await;
+
+    assert!(
+        result_insensitive.is_ok(),
+        "Case-insensitive search should succeed"
+    );
+    assert!(
+        result_sensitive.is_ok(),
+        "Case-sensitive search should succeed"
+    );
+
+    let insensitive = result_insensitive.unwrap();
+    let sensitive = result_sensitive.unwrap();
+
+    // Case-insensitive should find at least as many matches
+    // (it might find more if there are lowercase "hostname" entries)
+    println!(
+        "Case-insensitive: {} matches, Case-sensitive: {} matches",
+        insensitive.total_matches, sensitive.total_matches
+    );
+}
+
+/// Test that search_configs LLM format is structured correctly.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_llm_format_structure() {
+    let client = create_client_from_env();
+
+    let result = tools::search_configs(&client, "interface", None, false, 10).await;
+
+    assert!(result.is_ok(), "search_configs should succeed");
+
+    let search_result = result.unwrap();
+    let llm_output = search_result.to_llm_format();
+
+    // Verify LLM format structure
+    assert!(
+        llm_output.contains("## Configuration Search Results"),
+        "Should have header"
+    );
+    assert!(llm_output.contains("**Pattern:**"), "Should show pattern");
+    assert!(
+        llm_output.contains("**Nodes searched:**"),
+        "Should show nodes searched"
+    );
+
+    if search_result.total_matches > 0 {
+        assert!(
+            llm_output.contains("**Line"),
+            "Should show line numbers for matches"
+        );
+        assert!(llm_output.contains(">>>"), "Should have match marker");
+    }
+
+    println!("LLM Output:\n{}", llm_output);
+}
+
+/// Test search_configs with specific node and regex pattern.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_search_configs_regex_pattern() {
+    let client = create_client_from_env();
+
+    // Get a valid node with successful backup
+    let nodes = list_nodes(&client, None, Some(10), None).await.unwrap();
+    let success_node = nodes
+        .items
+        .iter()
+        .find(|n| n.effective_status() == Some("success"));
+
+    if success_node.is_none() {
+        println!("SKIP: No node with successful backup found");
+        return;
+    }
+
+    let node_name = success_node.unwrap().name.clone();
+
+    // Search for IP address pattern
+    let result = tools::search_configs(
+        &client,
+        r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", // IP address regex
+        Some(vec![node_name]),
+        true,
+        50,
+    )
+    .await;
+
+    assert!(result.is_ok(), "search_configs should succeed with regex");
+
+    let search_result = result.unwrap();
+    println!("Found {} IP address matches", search_result.total_matches);
+
+    // If matches found, verify they look like IP addresses
+    for node_match in &search_result.results {
+        for m in &node_match.matches {
+            let has_ip_pattern =
+                m.content.contains('.') && m.content.chars().any(|c| c.is_ascii_digit());
+            assert!(
+                has_ip_pattern,
+                "Match should contain IP-like pattern: {}",
+                m.content
+            );
+        }
+    }
+}

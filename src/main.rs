@@ -34,6 +34,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// - `prioritize_node` - Prioritize node in queue (FR16)
 /// - `reload_sources` - Reload source inventory (FR17)
 /// - `diff_configs` - Compare two configuration versions (FR9)
+/// - `search_configs` - Search for patterns across configurations (FR10-FR13)
 #[derive(Clone)]
 struct OxidizedServer {
     client: Arc<OxidizedClient>,
@@ -523,6 +524,46 @@ impl ServerHandler for OxidizedServer {
                     icons: None,
                     meta: None,
                 },
+                Tool {
+                    name: Cow::Borrowed("search_configs"),
+                    title: Some("Search Configurations".to_string()),
+                    description: Some(Cow::Borrowed(
+                        "Search for regex patterns across network device configurations. \
+                         Returns matches with line numbers and context lines. \
+                         Supports case-sensitive/insensitive search and optional node filtering.",
+                    )),
+                    input_schema: value_to_json_object(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Regex pattern to search for (e.g., 'ip address 10\\.0\\.' or 'snmp-server community')"
+                            },
+                            "nodes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional list of node names to limit search to. If not provided, searches all nodes."
+                            },
+                            "case_sensitive": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Whether the search is case-sensitive (default: true)"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "default": 100,
+                                "minimum": 1,
+                                "maximum": 1000,
+                                "description": "Maximum number of matches to return (default: 100)"
+                            }
+                        },
+                        "required": ["pattern"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                    icons: None,
+                    meta: None,
+                },
             ];
 
             Ok(ListToolsResult {
@@ -692,12 +733,67 @@ impl ServerHandler for OxidizedServer {
                         meta: None,
                     })
                 }
+                "search_configs" => {
+                    let pattern = args
+                        .as_ref()
+                        .and_then(|a| a.get("pattern"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::new(
+                                ErrorCode::INVALID_PARAMS,
+                                "[Error] Missing required parameter 'pattern'.\n\
+                                 [Context] Tool 'search_configs' requires a regex pattern.\n\
+                                 [Next Step] Provide a valid regex pattern parameter.",
+                                None,
+                            )
+                        })?;
+
+                    // Optional: nodes array
+                    let nodes: Option<Vec<String>> = args
+                        .as_ref()
+                        .and_then(|a| a.get("nodes"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        });
+
+                    // Optional: case_sensitive (default: true)
+                    let case_sensitive = args
+                        .as_ref()
+                        .and_then(|a| a.get("case_sensitive"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+
+                    // Optional: limit (default: 100, min: 1, max: 1000)
+                    let limit = args
+                        .as_ref()
+                        .and_then(|a| a.get("limit"))
+                        .and_then(|v| v.as_u64())
+                        .map(|l| l.clamp(1, 1000) as u32)
+                        .unwrap_or(100);
+
+                    let result =
+                        tools::search_configs(&client, pattern, nodes, case_sensitive, limit)
+                            .await
+                            .map_err(Self::to_mcp_error)?;
+
+                    let llm_output = result.to_llm_format();
+
+                    Ok(CallToolResult {
+                        content: vec![Content::text(llm_output)],
+                        structured_content: None,
+                        is_error: Some(false),
+                        meta: None,
+                    })
+                }
                 _ => Err(McpError::new(
                     ErrorCode::METHOD_NOT_FOUND,
                     format!(
                         "[Error] Unknown tool: '{}'\n\
                          [Context] Attempted to call a tool that does not exist.\n\
-                         [Suggestions] Available tools: fetch_node_config, prioritize_node, reload_sources, diff_configs\n\
+                         [Suggestions] Available tools: fetch_node_config, prioritize_node, reload_sources, diff_configs, search_configs\n\
                          [Next Step] Use one of the available tool names.",
                         tool_name
                     ),
@@ -746,7 +842,9 @@ async fn main() {
     info!(
         "Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://node/{{name}}/config, oxidized://node/{{name}}/versions, oxidized://stats"
     );
-    info!("Tools available: fetch_node_config, prioritize_node, reload_sources, diff_configs");
+    info!(
+        "Tools available: fetch_node_config, prioritize_node, reload_sources, diff_configs, search_configs"
+    );
 
     // Run the server with stdio transport
     // The serve() call returns a running service that we must keep alive with waiting()
