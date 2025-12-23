@@ -5,3 +5,4 @@
 pub mod config;
 pub mod error;
 pub mod oxidized;
+pub mod resources;

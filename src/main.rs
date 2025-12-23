@@ -1,24 +1,67 @@
 use mcp_oxidized::config::Config;
-use rmcp::{ServerHandler, ServiceExt, model::ServerInfo};
-use tracing::{error, info};
+use mcp_oxidized::error::{Actionable, OxidizedError};
+use mcp_oxidized::oxidized::OxidizedClient;
+use mcp_oxidized::resources;
+use rmcp::model::{
+    Annotated, ErrorCode, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+    PaginatedRequestParam, ProtocolVersion, RawResource, RawResourceTemplate,
+    ReadResourceRequestParam, ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
+use std::future::Future;
+use std::sync::Arc;
+use tracing::{error, info, instrument};
 use tracing_subscriber::{EnvFilter, fmt};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Minimal MCP server implementation
-/// Tools and resources will be added in later stories
+/// MCP server implementation for Oxidized network device backup system.
+///
+/// Provides resources for node discovery and statistics:
+/// - `oxidized://nodes` - List all nodes (paginated)
+/// - `oxidized://node/{name}` - Get specific node details
+/// - `oxidized://stats` - Global statistics
 #[derive(Clone)]
 struct OxidizedServer {
-    _config: Config,
+    client: Arc<OxidizedClient>,
+}
+
+impl OxidizedServer {
+    /// Create a new OxidizedServer with the given configuration.
+    fn new(config: Config) -> Self {
+        Self {
+            client: Arc::new(OxidizedClient::new(&config)),
+        }
+    }
+
+    /// Convert OxidizedError to MCP ErrorData with LLM-optimized message.
+    fn to_mcp_error(err: OxidizedError) -> McpError {
+        let code = match &err {
+            OxidizedError::NodeNotFound(_, _) => ErrorCode::INVALID_PARAMS,
+            OxidizedError::AuthFailed => ErrorCode::INVALID_REQUEST,
+            OxidizedError::ApiUnreachable { .. } => ErrorCode::INTERNAL_ERROR,
+            OxidizedError::InvalidRegex(_) => ErrorCode::INVALID_PARAMS,
+            OxidizedError::ConfigError(_) => ErrorCode::INVALID_REQUEST,
+            OxidizedError::ParseError { .. } => ErrorCode::PARSE_ERROR,
+            OxidizedError::HttpError { status_code, .. } => {
+                if *status_code >= 500 {
+                    ErrorCode::INTERNAL_ERROR
+                } else {
+                    ErrorCode::INVALID_REQUEST
+                }
+            }
+        };
+
+        McpError::new(code, err.to_llm_message(), None)
+    }
 }
 
 impl ServerHandler for OxidizedServer {
     fn get_info(&self) -> ServerInfo {
-        use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities};
-
         ServerInfo {
             protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::default(),
+            capabilities: ServerCapabilities::builder().enable_resources().build(),
             server_info: Implementation {
                 name: "mcp-oxidized".to_string(),
                 title: Some("Oxidized MCP Server".to_string()),
@@ -27,8 +70,185 @@ impl ServerHandler for OxidizedServer {
                 website_url: None,
             },
             instructions: Some(
-                "MCP server for Oxidized network device configuration backup system".to_string(),
+                "MCP server for Oxidized network device configuration backup system. \
+                 Use oxidized://nodes to list devices, oxidized://node/{name} for details, \
+                 and oxidized://stats for backup statistics."
+                    .to_string(),
             ),
+        }
+    }
+
+    #[instrument(skip(self, _context), fields(request_id = %resources::generate_request_id()))]
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        async move {
+            let resources = vec![
+                Annotated::new(
+                    RawResource {
+                        uri: "oxidized://nodes".to_string(),
+                        name: "nodes".to_string(),
+                        title: Some("All Nodes".to_string()),
+                        description: Some(
+                            "List all network devices in the Oxidized inventory with pagination"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                        size: None,
+                        icons: None,
+                        meta: None,
+                    },
+                    None,
+                ),
+                Annotated::new(
+                    RawResource {
+                        uri: "oxidized://stats".to_string(),
+                        name: "stats".to_string(),
+                        title: Some("Statistics".to_string()),
+                        description: Some(
+                            "Global backup statistics including success rate and last run time"
+                                .to_string(),
+                        ),
+                        mime_type: Some("application/json".to_string()),
+                        size: None,
+                        icons: None,
+                        meta: None,
+                    },
+                    None,
+                ),
+            ];
+
+            Ok(ListResourcesResult {
+                resources,
+                next_cursor: None,
+                meta: None,
+            })
+        }
+    }
+
+    #[instrument(skip(self, _context), fields(request_id = %resources::generate_request_id()))]
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_ {
+        async move {
+            let templates = vec![Annotated::new(
+                RawResourceTemplate {
+                    uri_template: "oxidized://node/{name}".to_string(),
+                    name: "node".to_string(),
+                    title: Some("Node Details".to_string()),
+                    description: Some(
+                        "Get detailed information about a specific network device by name"
+                            .to_string(),
+                    ),
+                    mime_type: Some("application/json".to_string()),
+                },
+                None,
+            )];
+
+            Ok(ListResourceTemplatesResult {
+                resource_templates: templates,
+                next_cursor: None,
+                meta: None,
+            })
+        }
+    }
+
+    #[instrument(skip(self, _context), fields(request_id = %resources::generate_request_id(), uri = %request.uri))]
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+        let client = Arc::clone(&self.client);
+
+        async move {
+            let uri = &request.uri;
+
+            // Parse the URI and route to appropriate handler
+            if uri == "oxidized://nodes" {
+                // List all nodes
+                let result = resources::list_nodes(&*client, None, None, None)
+                    .await
+                    .map_err(Self::to_mcp_error)?;
+
+                let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                    McpError::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to serialize nodes: {}", e),
+                        None,
+                    )
+                })?;
+
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::TextResourceContents {
+                        uri: uri.clone(),
+                        mime_type: Some("application/json".to_string()),
+                        text: json,
+                        meta: None,
+                    }],
+                })
+            } else if uri == "oxidized://stats" {
+                // Get statistics
+                let result = resources::get_stats(&*client)
+                    .await
+                    .map_err(Self::to_mcp_error)?;
+
+                let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                    McpError::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to serialize stats: {}", e),
+                        None,
+                    )
+                })?;
+
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::TextResourceContents {
+                        uri: uri.clone(),
+                        mime_type: Some("application/json".to_string()),
+                        text: json,
+                        meta: None,
+                    }],
+                })
+            } else if let Some(node_name) = uri.strip_prefix("oxidized://node/") {
+                // Get specific node
+                let result = resources::get_node(&*client, node_name)
+                    .await
+                    .map_err(Self::to_mcp_error)?;
+
+                let json = serde_json::to_string_pretty(&result).map_err(|e| {
+                    McpError::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to serialize node: {}", e),
+                        None,
+                    )
+                })?;
+
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::TextResourceContents {
+                        uri: uri.clone(),
+                        mime_type: Some("application/json".to_string()),
+                        text: json,
+                        meta: None,
+                    }],
+                })
+            } else {
+                // Unknown resource URI
+                Err(McpError::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "[Error] Unknown resource URI: '{}'\n\
+                         [Context] Attempted to read a resource that does not exist.\n\
+                         [Suggestions] Available resources: oxidized://nodes, oxidized://stats, oxidized://node/{{name}}\n\
+                         [Next Step] Use one of the available resource URIs.",
+                        uri
+                    ),
+                    None,
+                ))
+            }
         }
     }
 }
@@ -65,9 +285,10 @@ async fn main() {
     };
 
     // Create MCP server instance
-    let server = OxidizedServer { _config: config };
+    let server = OxidizedServer::new(config);
 
     info!("MCP server initialized, starting stdio transport");
+    info!("Resources available: oxidized://nodes, oxidized://node/{{name}}, oxidized://stats");
 
     // Run the server with stdio transport
     if let Err(e) = server.serve(rmcp::transport::stdio()).await {

@@ -16,7 +16,9 @@
 //! ```
 
 use mcp_oxidized::config::Config;
+use mcp_oxidized::error::OxidizedError;
 use mcp_oxidized::oxidized::{OxidizedBackend, OxidizedClient};
+use mcp_oxidized::resources::{get_node, get_stats, list_nodes};
 
 /// Helper to create a client from environment variables.
 fn create_client_from_env() -> OxidizedClient {
@@ -408,4 +410,179 @@ async fn test_stats_cache_hit() {
         duration2 < std::time::Duration::from_millis(100),
         "Cached stats request should be < 100ms"
     );
+}
+
+// =============================================================================
+// Resource Handler Integration Tests (Story 1.6)
+// =============================================================================
+
+/// Test that list_nodes() resource returns paginated data.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_list_nodes_returns_paginated_data() {
+    let client = create_client_from_env();
+
+    let result = list_nodes(&client, None, None, None).await;
+
+    assert!(result.is_ok(), "list_nodes should succeed");
+
+    let response = result.unwrap();
+    assert!(response.total > 0, "Should have at least one node");
+    assert_eq!(response.offset, 0, "Default offset should be 0");
+    assert!(response.limit <= 500, "Limit should be capped at 500");
+}
+
+/// Test that list_nodes() respects pagination parameters.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_list_nodes_pagination_params() {
+    let client = create_client_from_env();
+
+    let result = list_nodes(&client, Some(0), Some(5), None).await;
+
+    assert!(result.is_ok(), "list_nodes with pagination should succeed");
+
+    let response = result.unwrap();
+    assert!(response.items.len() <= 5, "Should respect limit parameter");
+    assert_eq!(response.offset, 0, "Should preserve offset");
+    assert_eq!(response.limit, 5, "Should preserve limit");
+}
+
+/// Test that list_nodes() filters by group.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_list_nodes_group_filter() {
+    let client = create_client_from_env();
+
+    // First get all nodes to find a valid group
+    let all_nodes = list_nodes(&client, None, None, None).await.unwrap();
+
+    if all_nodes.items.is_empty() {
+        println!("Warning: No nodes found, skipping group filter test");
+        return;
+    }
+
+    let group = &all_nodes.items[0].group;
+
+    // Now filter by that group
+    let filtered = list_nodes(&client, None, None, Some(group)).await.unwrap();
+
+    // All items should have matching group
+    for node in &filtered.items {
+        assert_eq!(
+            &node.group, group,
+            "All filtered nodes should have matching group"
+        );
+    }
+}
+
+/// Test that get_node() resource returns node with cache metadata.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_returns_data() {
+    let client = create_client_from_env();
+
+    // Get a valid node name
+    let nodes = list_nodes(&client, None, Some(1), None).await.unwrap();
+
+    if nodes.items.is_empty() {
+        println!("Warning: No nodes found, skipping get_node test");
+        return;
+    }
+
+    let node_name = &nodes.items[0].name;
+
+    let result = get_node(&client, node_name).await;
+
+    assert!(result.is_ok(), "get_node should succeed");
+
+    let response = result.unwrap();
+    assert_eq!(
+        &response.node.name, node_name,
+        "Returned node should match request"
+    );
+}
+
+/// Test that get_node() returns NodeNotFound with suggestions.
+///
+/// This test uses a two-phase approach:
+/// 1. First, list nodes to find a real node name prefix
+/// 2. Then, query for a non-existent node with that prefix to trigger suggestions
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_get_node_not_found_has_suggestions() {
+    let client = create_client_from_env();
+
+    // Phase 1: Get a real node to build a similar-but-nonexistent name
+    let nodes_result = list_nodes(&client, None, Some(5), None).await;
+    assert!(nodes_result.is_ok(), "Should be able to list nodes");
+
+    let nodes = nodes_result.unwrap();
+    if nodes.items.is_empty() {
+        println!("SKIP: No nodes in inventory to test suggestions");
+        return;
+    }
+
+    // Take first node's name and append something to make it not exist
+    let existing_name = &nodes.items[0].name;
+    let non_existent_name = format!("{}-NONEXISTENT-999", existing_name);
+
+    // Phase 2: Query for non-existent node - should get suggestions
+    let result = get_node(&client, &non_existent_name).await;
+
+    assert!(result.is_err(), "Should return error for non-existent node");
+
+    match result.unwrap_err() {
+        OxidizedError::NodeNotFound(name, suggestions) => {
+            assert_eq!(name, non_existent_name);
+            // With at least one node in inventory and a prefix match, we should get suggestions
+            assert!(
+                !suggestions.is_empty(),
+                "Should return suggestions when nodes exist with similar prefix. \
+                 Original node '{}' should appear in suggestions.",
+                existing_name
+            );
+            assert!(
+                suggestions.contains(existing_name),
+                "Suggestions {:?} should contain the original node '{}'",
+                suggestions,
+                existing_name
+            );
+            println!(
+                "NodeNotFound correctly returned {} suggestions: {:?}",
+                suggestions.len(),
+                suggestions
+            );
+        }
+        other => panic!("Expected NodeNotFound error, got: {:?}", other),
+    }
+}
+
+/// Test that get_stats() resource returns statistics via resource handler.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_resource_get_stats_returns_data() {
+    let client = create_client_from_env();
+
+    let result = get_stats(&client).await;
+
+    assert!(result.is_ok(), "get_stats should succeed");
+
+    let response = result.unwrap();
+    println!("Stats: {:?}", response.stats);
+}
+
+/// Test that list_nodes() includes cache metadata.
+#[tokio::test]
+#[ignore] // Requires real Oxidized server - run with: cargo test -- --ignored
+async fn test_list_nodes_cache_metadata() {
+    let client = create_client_from_env();
+
+    // First call - cache miss
+    let first = list_nodes(&client, None, None, None).await.unwrap();
+    assert!(!first.metadata.cache_hit, "First call should be cache miss");
+
+    // Second call - cache hit
+    let second = list_nodes(&client, None, None, None).await.unwrap();
+    assert!(second.metadata.cache_hit, "Second call should be cache hit");
 }

@@ -688,12 +688,14 @@ impl OxidizedClient {
     }
 
     /// Check HTTP status code and map to appropriate error.
+    ///
+    /// Note: NodeNotFound returns empty suggestions because this method runs at the
+    /// HTTP layer without access to the node list. The resources layer enriches
+    /// NodeNotFound errors with fuzzy-matched suggestions via `find_similar_nodes`.
     fn check_status(&self, status: StatusCode, context: &str) -> Result<(), OxidizedError> {
         if status == StatusCode::NOT_FOUND {
-            return Err(OxidizedError::NodeNotFound(
-                context.to_string(),
-                vec![], // TODO(Story 1.6): Populate suggestions via fuzzy matching
-            ));
+            // Empty suggestions here - enriched by resources::get_node with fuzzy matching
+            return Err(OxidizedError::NodeNotFound(context.to_string(), vec![]));
         }
 
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
