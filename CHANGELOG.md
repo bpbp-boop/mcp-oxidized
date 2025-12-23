@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2025-12-23
+
 ### Added
 
 - **SSL Verification Control** - New `OXIDIZED_SSL_VERIFY` environment variable to disable certificate verification for self-signed certificates (default: `true`, only affects HTTPS URLs)
@@ -78,6 +80,7 @@ mcp-oxidized is an MCP server that exposes Oxidized network configuration backup
 - docs/configuration.md - All environment variables and MCP client configs
 - docs/troubleshooting.md - Common errors and solutions
 
-[Unreleased]: https://github.com/fxthiry/mcp-oxidized/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/fxthiry/mcp-oxidized/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/fxthiry/mcp-oxidized/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/fxthiry/mcp-oxidized/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/fxthiry/mcp-oxidized/releases/tag/v1.0.0
