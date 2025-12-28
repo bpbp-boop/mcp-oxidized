@@ -1042,7 +1042,7 @@ impl OxidizedBackend for OxidizedClient {
 
         // Cache miss - fetch with retry
         tracing::debug!(node = %name, "Cache miss for node, fetching from API");
-        let endpoint = format!("/node/show/{}.json", name);
+        let endpoint = format!("/node/show/{}.json", urlencoding::encode(name));
         let node: Node = self
             .execute_with_retry(|| async {
                 let response = self.build_request(&endpoint).send().await;
@@ -1065,7 +1065,7 @@ impl OxidizedBackend for OxidizedClient {
 
         // Cache miss - fetch with retry
         tracing::debug!(node = %name, "Cache miss for config, fetching from API");
-        let endpoint = format!("/node/fetch/{}", name);
+        let endpoint = format!("/node/fetch/{}", urlencoding::encode(name));
         let config = self
             .execute_with_retry(|| async {
                 let response = self.build_request(&endpoint).send().await;
@@ -1087,7 +1087,7 @@ impl OxidizedBackend for OxidizedClient {
         let (node, _) = self.get_node(name).await?;
 
         // Versions are not cached (historical data, rarely accessed repeatedly)
-        let endpoint = format!("/node/version.json?node_full={}", node.full_name);
+        let endpoint = format!("/node/version.json?node_full={}", urlencoding::encode(&node.full_name));
         self.execute_with_retry(|| async {
             let response = self.build_request(&endpoint).send().await;
             self.handle_json_response(response, name).await
@@ -1105,7 +1105,7 @@ impl OxidizedBackend for OxidizedClient {
         // API returns JSON array of lines: ["line1\n", "line2\n", ...]
         let endpoint = format!(
             "/node/version/view.json?node={}&group={}&oid={}",
-            name, node.group, oid
+            urlencoding::encode(name), urlencoding::encode(&node.group), oid
         );
         let context = format!("{}@{}", name, oid);
 
@@ -1143,7 +1143,7 @@ impl OxidizedBackend for OxidizedClient {
     #[instrument(skip(self), fields(url = %self.base_url, node = %node))]
     async fn trigger_backup(&self, node: &str) -> Result<(), OxidizedError> {
         // Oxidized-web 0.18.0 uses GET /node/next/{name}.json to trigger backup
-        let endpoint = format!("/node/next/{}.json", node);
+        let endpoint = format!("/node/next/{}.json", urlencoding::encode(node));
         let result = self
             .execute_with_retry(|| async {
                 let response = self.build_request(&endpoint).send().await;
@@ -1162,7 +1162,7 @@ impl OxidizedBackend for OxidizedClient {
     #[instrument(skip(self), fields(url = %self.base_url, node = %node))]
     async fn prioritize_node(&self, node: &str) -> Result<(), OxidizedError> {
         // Oxidized-web 0.18.0 uses GET /node/next/{name}.json to prioritize node
-        let endpoint = format!("/node/next/{}.json", node);
+        let endpoint = format!("/node/next/{}.json", urlencoding::encode(node));
         let result = self
             .execute_with_retry(|| async {
                 let response = self.build_request(&endpoint).send().await;
@@ -2789,5 +2789,93 @@ mod tests {
         assert_eq!(client.base_url, "https://oxidized.example.com");
         assert_eq!(client.custom_headers.len(), 2);
         // Note: ssl_verify=false is applied at client builder level (can't directly verify)
+    }
+
+    // -------------------------------------------------------------------------
+    // URL Encoding Tests (Story 6-1)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_urlencoding_node_name_with_space() {
+        // Verify urlencoding::encode handles spaces correctly
+        let name = "router 1";
+        let encoded = urlencoding::encode(name);
+        assert_eq!(encoded, "router%201");
+    }
+
+    #[test]
+    fn test_urlencoding_node_name_with_slash() {
+        // Verify urlencoding::encode handles slashes correctly
+        let name = "dc/switch-1";
+        let encoded = urlencoding::encode(name);
+        assert_eq!(encoded, "dc%2Fswitch-1");
+    }
+
+    #[test]
+    fn test_urlencoding_node_name_with_special_chars() {
+        // Verify urlencoding::encode handles various special characters
+        let name = "router@dc1#01";
+        let encoded = urlencoding::encode(name);
+        assert_eq!(encoded, "router%40dc1%2301");
+    }
+
+    #[test]
+    fn test_urlencoding_node_name_utf8() {
+        // Verify urlencoding::encode handles UTF-8 correctly
+        let name = "routeur-été";
+        let encoded = urlencoding::encode(name);
+        assert_eq!(encoded, "routeur-%C3%A9t%C3%A9");
+    }
+
+    #[test]
+    fn test_urlencoding_node_name_plain() {
+        // Verify urlencoding::encode doesn't modify plain names
+        let name = "switch-core-01";
+        let encoded = urlencoding::encode(name);
+        assert_eq!(encoded, "switch-core-01");
+    }
+
+    #[test]
+    fn test_urlencoding_decode_roundtrip() {
+        // Verify encode/decode roundtrip preserves original value
+        let names = vec![
+            "router 1",
+            "dc/switch-1",
+            "routeur-été",
+            "node@group#123",
+            "plain-name",
+        ];
+
+        for name in names {
+            let encoded = urlencoding::encode(name);
+            let decoded = urlencoding::decode(&encoded).expect("Should decode");
+            assert_eq!(decoded, name, "Roundtrip failed for: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_endpoint_format_with_encoded_name() {
+        // Verify endpoint formatting works correctly with encoded names
+        let name = "router 1";
+        let endpoint = format!("/node/show/{}.json", urlencoding::encode(name));
+        assert_eq!(endpoint, "/node/show/router%201.json");
+    }
+
+    #[test]
+    fn test_endpoint_format_with_encoded_group_and_name() {
+        // Verify endpoint formatting with multiple encoded parameters
+        let name = "switch 1";
+        let group = "dc/core";
+        let oid = "abc123";
+        let endpoint = format!(
+            "/node/version/view.json?node={}&group={}&oid={}",
+            urlencoding::encode(name),
+            urlencoding::encode(group),
+            oid
+        );
+        assert_eq!(
+            endpoint,
+            "/node/version/view.json?node=switch%201&group=dc%2Fcore&oid=abc123"
+        );
     }
 }

@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "network-programming"]
 [dependencies]
 async-trait = "0.1.89"
 moka = { version = "0.12.12", features = ["future"] }
-percent-encoding = "2.3.2"
+urlencoding = "2.1.3"
 regex = "1.12.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "0.12.0", features = ["server", "transport-io"] }
@@ -29,7 +29,6 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 [dev-dependencies]
 serial_test = "3.2.0"
 tempfile = "3.23.0"
-urlencoding = "2.1.3"
 wiremock = "0.6.5"
 
 # The profile that 'dist' will build with

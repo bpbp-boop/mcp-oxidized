@@ -3,7 +3,6 @@ use mcp_oxidized::error::{Actionable, OxidizedError};
 use mcp_oxidized::oxidized::OxidizedClient;
 use mcp_oxidized::resources;
 use mcp_oxidized::tools;
-use percent_encoding::percent_decode_str;
 use rmcp::model::{
     Annotated, CallToolRequestParam, CallToolResult, Content, ErrorCode, Implementation,
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParam,
@@ -32,9 +31,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// assert_eq!(decode_node_name("switch-core"), "switch-core");
 /// ```
 fn decode_node_name(encoded: &str) -> Cow<'_, str> {
-    percent_decode_str(encoded)
-        .decode_utf8()
-        .unwrap_or(Cow::Borrowed(encoded))
+    urlencoding::decode(encoded).unwrap_or(Cow::Borrowed(encoded))
 }
 
 /// MCP server implementation for Oxidized network device backup system.
@@ -960,4 +957,50 @@ async fn main() {
     }
 
     info!("mcp-oxidized server shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // decode_node_name Tests (Story 6-1)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_decode_node_name_with_space() {
+        let result = decode_node_name("router%201");
+        assert_eq!(result, "router 1");
+    }
+
+    #[test]
+    fn test_decode_node_name_with_slash() {
+        let result = decode_node_name("dc%2Fswitch-1");
+        assert_eq!(result, "dc/switch-1");
+    }
+
+    #[test]
+    fn test_decode_node_name_plain() {
+        let result = decode_node_name("switch-core-01");
+        assert_eq!(result, "switch-core-01");
+    }
+
+    #[test]
+    fn test_decode_node_name_utf8() {
+        let result = decode_node_name("routeur-%C3%A9t%C3%A9");
+        assert_eq!(result, "routeur-été");
+    }
+
+    #[test]
+    fn test_decode_node_name_invalid_utf8_returns_original() {
+        // Invalid percent-encoding should return original string
+        let result = decode_node_name("invalid%ZZ");
+        assert_eq!(result, "invalid%ZZ");
+    }
+
+    #[test]
+    fn test_decode_node_name_empty() {
+        let result = decode_node_name("");
+        assert_eq!(result, "");
+    }
 }
