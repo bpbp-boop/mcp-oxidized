@@ -619,9 +619,10 @@ impl OxidizedClient {
             .build()
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to build HTTP client");
-                OxidizedError::ConfigError(crate::config::ConfigError::InvalidUrl(
-                    format!("HTTP client build failed: {}", e)
-                ))
+                OxidizedError::ConfigError(crate::config::ConfigError::InvalidUrl(format!(
+                    "HTTP client build failed: {}",
+                    e
+                )))
             })?;
 
         let auth = match (&config.oxidized_user, &config.oxidized_password) {
@@ -1128,7 +1129,10 @@ impl OxidizedBackend for OxidizedClient {
         let (node, _) = self.get_node(name).await?;
 
         // Versions are not cached (historical data, rarely accessed repeatedly)
-        let endpoint = format!("/node/version.json?node_full={}", urlencoding::encode(&node.full_name));
+        let endpoint = format!(
+            "/node/version.json?node_full={}",
+            urlencoding::encode(&node.full_name)
+        );
         self.execute_with_retry(|| async {
             let response = self.build_request(&endpoint).send().await;
             self.handle_json_response(response, name).await
@@ -1146,7 +1150,9 @@ impl OxidizedBackend for OxidizedClient {
         // API returns JSON array of lines: ["line1\n", "line2\n", ...]
         let endpoint = format!(
             "/node/version/view.json?node={}&group={}&oid={}",
-            urlencoding::encode(name), urlencoding::encode(&node.group), oid
+            urlencoding::encode(name),
+            urlencoding::encode(&node.group),
+            oid
         );
         let context = format!("{}@{}", name, oid);
 
