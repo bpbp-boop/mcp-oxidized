@@ -41,7 +41,7 @@ cargo build --release
 
 ### 3. Configuration
 
-Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`):
+Add to your MCP client config. Example for Claude Desktop (`~/.config/Claude/claude_desktop_config.json`):
 
 ```json
 {
@@ -60,20 +60,7 @@ Add to your Claude Desktop config (`~/.config/Claude/claude_desktop_config.json`
 
 **Zero-config mode:** If no env vars are set, defaults to `http://localhost:8888` with no authentication.
 
-**Advanced options:**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OXIDIZED_URL` | `http://localhost:8888` | Oxidized server URL |
-| `OXIDIZED_USER` | _(none)_ | Username for Basic Auth |
-| `OXIDIZED_PASSWORD` | _(none)_ | Password for Basic Auth |
-| `OXIDIZED_PASSWORD_FILE` | _(none)_ | File containing password (takes precedence) |
-| `OXIDIZED_SSL_VERIFY` | `true` | SSL certificate verification (`false` to disable) |
-| `OXIDIZED_HEADERS` | _(none)_ | Custom HTTP headers (`Header1:Value1,Header2:Value2`) |
-
-**Note:** Custom `Authorization` header in `OXIDIZED_HEADERS` takes precedence over Basic Auth credentials.
-
-For more configuration options, see [docs/configuration.md](docs/configuration.md).
+📖 **[Full Configuration Guide](docs/configuration.md)** - All environment variables, MCP client configs (Cursor, Zed, Windsurf), SSL options, custom headers, and security best practices.
 
 ## Tools
 
@@ -118,6 +105,21 @@ Ask your AI assistant:
 - "Compare the last two versions of switch-access-02"
 - "Find all devices with SNMP community 'public' configured"
 - "Trigger a backup of firewall-edge-01 now"
+
+---
+
+## Security Considerations
+
+> ⚠️ **Important:** Network device configurations often contain sensitive information (passwords, SNMP communities, VPN keys, ACLs, etc.). By using mcp-oxidized, you are giving your AI assistant access to this data.
+
+**Recommendations:**
+
+- **Review what you share** - Be mindful when asking your AI to analyze configurations; the content is sent to the LLM provider
+- **Use with trusted LLM providers** - Ensure your organization's policies allow sending network configuration data to the AI service you're using
+- **Consider data residency** - Some LLM providers may process data in different jurisdictions
+- **Limit scope when possible** - Use node filtering in searches rather than querying all configurations
+
+mcp-oxidized itself does not log or transmit configuration content beyond what the MCP protocol requires for your AI assistant to function.
 
 ---
 

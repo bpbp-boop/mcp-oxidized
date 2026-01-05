@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-01-05
+
+### Changed
+
+- **URL Encoding** - All node names are now URL-encoded when calling Oxidized API endpoints, fixing issues with special characters (spaces, slashes, etc.)
+- **Unified Dependencies** - Replaced `percent-encoding` with `urlencoding` crate (simpler API, fewer dependencies)
+- **Tokio Optimization** - Reduced tokio features from `["full"]` to minimal required set (`rt-multi-thread`, `macros`, `sync`, `time`)
+
+### Fixed
+
+- **Panic Elimination** - Replaced all `.expect()` calls in production code with proper error handling:
+  - `OxidizedClient::new()` → `OxidizedClient::try_new()` returning `Result`
+  - Retry loop graceful fallback instead of panic
+  - Semaphore acquisition in search_configs
+- **Regex Caching** - Static regex compilation for `TD_REGEX` and `SECTION_REGEX` (performance improvement)
+
+### Added
+
+- 14 new unit tests for `fetch_node_config`, `prioritize_node`, and `reload_sources` tools
+- Standardized test patterns with `expected_message()` helpers
+- Unicode and JSON escaping test coverage
+
 ## [1.1.0] - 2025-12-23
 
 ### Added
@@ -80,7 +102,8 @@ mcp-oxidized is an MCP server that exposes Oxidized network configuration backup
 - docs/configuration.md - All environment variables and MCP client configs
 - docs/troubleshooting.md - Common errors and solutions
 
-[Unreleased]: https://github.com/fxthiry/mcp-oxidized/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/fxthiry/mcp-oxidized/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/fxthiry/mcp-oxidized/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/fxthiry/mcp-oxidized/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/fxthiry/mcp-oxidized/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/fxthiry/mcp-oxidized/releases/tag/v1.0.0
