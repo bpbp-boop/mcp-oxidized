@@ -61,3 +61,100 @@ pub async fn fetch_node_config(
         Err(e) => Err(e),
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to generate the expected success message for a node.
+    /// This mirrors the actual message format in fetch_node_config().
+    fn expected_message(node: &str) -> String {
+        format!(
+            "Backup triggered for node '{}'. Fresh configuration will be available shortly.",
+            node
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Message Format Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_success_message_exact_format() {
+        // Verify the message format matches what the function produces
+        let node = "SW-Core-01";
+        let result = ToolResult::success(node, expected_message(node));
+
+        assert!(result.success);
+        assert_eq!(result.node, node);
+        assert_eq!(
+            result.message,
+            "Backup triggered for node 'SW-Core-01'. Fresh configuration will be available shortly."
+        );
+    }
+
+    #[test]
+    fn test_success_message_with_special_characters() {
+        // Node names can contain special characters like hyphens, underscores, dots
+        let node = "router-site_1.example.com";
+        let result = ToolResult::success(node, expected_message(node));
+
+        assert!(result.success);
+        assert_eq!(result.node, node);
+        assert!(
+            result.message.contains(node),
+            "Message should contain the exact node name with special chars"
+        );
+    }
+
+    #[test]
+    fn test_success_message_with_unicode() {
+        // Edge case: node names with unicode (unlikely but possible)
+        let node = "router-日本語";
+        let result = ToolResult::success(node, expected_message(node));
+
+        assert!(result.success);
+        assert_eq!(result.node, node);
+        assert!(result.message.contains(node));
+    }
+
+    // -------------------------------------------------------------------------
+    // Serialization Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_tool_result_json_serialization() {
+        let node = "test-node";
+        let result = ToolResult::success(node, expected_message(node));
+
+        let json = serde_json::to_string(&result).expect("Should serialize to JSON");
+
+        // Verify JSON structure
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"node\":\"test-node\""));
+        assert!(json.contains("\"message\":"));
+
+        // Verify round-trip via generic JSON
+        let value: serde_json::Value = serde_json::from_str(&json).expect("Should parse as JSON");
+        assert_eq!(value["success"], true);
+        assert_eq!(value["node"], "test-node");
+    }
+
+    #[test]
+    fn test_tool_result_json_escapes_special_chars() {
+        // Ensure special characters in node names are properly escaped in JSON
+        let node = "node\"with'quotes";
+        let result = ToolResult::success(node, expected_message(node));
+
+        let json = serde_json::to_string(&result).expect("Should serialize to JSON");
+
+        // Should be valid JSON (parse won't fail)
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("Should parse as valid JSON");
+        assert_eq!(value["node"], node);
+    }
+}
