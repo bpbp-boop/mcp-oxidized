@@ -57,10 +57,14 @@ struct OxidizedServer {
 
 impl OxidizedServer {
     /// Create a new OxidizedServer with the given configuration.
-    fn new(config: Config) -> Self {
-        Self {
-            client: Arc::new(OxidizedClient::new(&config)),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns `OxidizedError` if the HTTP client cannot be initialized.
+    fn try_new(config: Config) -> Result<Self, OxidizedError> {
+        Ok(Self {
+            client: Arc::new(OxidizedClient::try_new(&config)?),
+        })
     }
 
     /// Convert OxidizedError to MCP ErrorData with LLM-optimized message.
@@ -930,7 +934,13 @@ async fn main() {
     };
 
     // Create MCP server instance
-    let server = OxidizedServer::new(config);
+    let server = match OxidizedServer::try_new(config) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to create server: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     info!("MCP server initialized, starting stdio transport");
     info!(

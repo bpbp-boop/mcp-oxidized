@@ -71,7 +71,7 @@ fn create_client_from_env() -> OxidizedClient {
         custom_headers,
     };
 
-    OxidizedClient::new(&config)
+    OxidizedClient::try_new(&config).expect("Failed to create OxidizedClient")
 }
 
 /// Test that get_nodes() returns a non-empty list from a real Oxidized server.

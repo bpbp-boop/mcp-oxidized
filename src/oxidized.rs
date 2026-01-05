@@ -17,19 +17,21 @@
 //! use mcp_oxidized::config::Config;
 //!
 //! let config = Config::load()?;
-//! let client = OxidizedClient::new(&config);
+//! let client = OxidizedClient::try_new(&config)?;
 //!
 //! // List all nodes
-//! let nodes = client.get_nodes().await?;
+//! let (nodes, _metadata) = client.get_nodes().await?;
 //! for node in nodes {
-//!     println!("{}: {}", node.name, node.status);
+//!     println!("{}: {:?}", node.name, node.status);
 //! }
 //! ```
 
 use async_trait::async_trait;
 use moka::future::Cache;
+use regex::Regex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::instrument;
 
@@ -72,6 +74,13 @@ pub const MAX_RETRY_ATTEMPTS: u8 = 3;
 /// Retry delays in milliseconds for exponential backoff.
 /// Delay sequence: 200ms, 800ms (exponential progression).
 pub const RETRY_DELAYS_MS: [u64; 2] = [200, 800];
+
+/// Regex for parsing conf_search HTML response.
+///
+/// Compiled once at first use for performance. Extracts content from `<td>` tags.
+/// Pattern: `<td>([^<]+)</td>` - captures text between opening and closing td tags.
+static TD_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<td>([^<]+)</td>").expect("TD_REGEX is a valid pattern"));
 
 // ============================================================================
 // Data Models
@@ -593,11 +602,11 @@ impl OxidizedClient {
     ///
     /// * `config` - Server configuration including URL and optional credentials
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the reqwest client cannot be built (extremely rare, indicates
-    /// TLS backend issues).
-    pub fn new(config: &Config) -> Self {
+    /// Returns `OxidizedError::ConfigError` if the HTTP client cannot be built
+    /// (e.g., TLS backend issues).
+    pub fn try_new(config: &Config) -> Result<Self, OxidizedError> {
         // Build HTTP client with SSL verification setting (FR43)
         // Only apply danger_accept_invalid_certs for HTTPS URLs (no effect on HTTP)
         let is_https = config.oxidized_url.starts_with("https://");
@@ -608,7 +617,12 @@ impl OxidizedClient {
             .timeout(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
             .danger_accept_invalid_certs(skip_ssl_verify)
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to build HTTP client");
+                OxidizedError::ConfigError(crate::config::ConfigError::InvalidUrl(
+                    format!("HTTP client build failed: {}", e)
+                ))
+            })?;
 
         let auth = match (&config.oxidized_user, &config.oxidized_password) {
             (Some(user), Some(pass)) => Some(BasicAuth::new(user.clone(), pass.clone())),
@@ -632,7 +646,7 @@ impl OxidizedClient {
             .time_to_live(Duration::from_secs(NODES_CACHE_TTL_SECS))
             .build();
 
-        Self {
+        Ok(Self {
             client,
             base_url: config.oxidized_url.clone(),
             auth,
@@ -641,7 +655,20 @@ impl OxidizedClient {
             config_cache,
             stats_cache,
             node_cache,
-        }
+        })
+    }
+
+    /// Create a new OxidizedClient from configuration (convenience wrapper).
+    ///
+    /// This method panics on failure and is intended for use in tests
+    /// or when the caller can guarantee the configuration is valid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the HTTP client cannot be built.
+    #[cfg(test)]
+    pub fn new(config: &Config) -> Self {
+        Self::try_new(config).expect("Failed to create OxidizedClient")
     }
 
     /// Execute an operation with retry on transient errors (NFR11).
@@ -697,13 +724,30 @@ impl OxidizedClient {
         }
 
         // If we exhausted all retries, return the last transient error
-        let error = last_error.expect("Should have error after max retries");
-        tracing::error!(
-            attempts = MAX_RETRY_ATTEMPTS,
-            error_type = %error.error_type(),
-            "Request failed after all retries"
-        );
-        Err(error)
+        // Note: last_error should always be Some here since we only reach this point
+        // after the loop has run at least once with a transient error, but we handle
+        // the None case gracefully to avoid panics.
+        match last_error {
+            Some(error) => {
+                tracing::error!(
+                    attempts = MAX_RETRY_ATTEMPTS,
+                    error_type = %error.error_type(),
+                    "Request failed after all retries"
+                );
+                Err(error)
+            }
+            None => {
+                // This should never happen, but we handle it gracefully
+                tracing::error!(
+                    attempts = MAX_RETRY_ATTEMPTS,
+                    "Retry loop completed without error (unexpected state)"
+                );
+                Err(OxidizedError::HttpError {
+                    status_code: 500,
+                    context: "Retry loop completed in unexpected state".to_string(),
+                })
+            }
+        }
     }
 
     /// Invalidate cache entries for a specific node (AC: 4).
@@ -890,13 +934,10 @@ impl OxidizedClient {
     ///
     /// A list of unique node names found in the response.
     pub fn parse_conf_search_html(html: &str) -> Vec<String> {
-        // Regex to extract first <td> content in each row: <td>NODE_NAME</td>
-        let re = regex::Regex::new(r"<td>([^<]+)</td>").expect("Valid regex");
-
         let mut nodes: Vec<String> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        for cap in re.captures_iter(html) {
+        for cap in TD_REGEX.captures_iter(html) {
             if let Some(node_match) = cap.get(1) {
                 let node = node_match.as_str().trim();
 

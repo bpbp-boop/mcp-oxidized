@@ -36,7 +36,7 @@
 //! use mcp_oxidized::resources::{list_nodes, get_node, get_stats, get_node_config};
 //! use mcp_oxidized::oxidized::OxidizedClient;
 //!
-//! let client = OxidizedClient::new(&config);
+//! let client = OxidizedClient::try_new(&config)?;
 //!
 //! // List all nodes with pagination
 //! let nodes = list_nodes(&client, None, None, None).await?;
@@ -52,13 +52,33 @@
 //! let stats = get_stats(&client).await?;
 //! ```
 
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::Regex;
 use serde::Serialize;
 use tracing::instrument;
 
 use crate::error::OxidizedError;
 use crate::oxidized::{CacheMetadata, CachedStats, Node, NodeVersion, OxidizedBackend};
+
+// ============================================================================
+// Static Regex Patterns (Story 6-2: Performance optimization)
+// ============================================================================
+
+/// Regex pattern for detecting configuration sections.
+///
+/// Compiled once at first use for performance. Matches common section headers
+/// from Cisco IOS, Juniper JunOS, and similar platforms.
+///
+/// Patterns matched:
+/// - Cisco: interface, router, vlan, ip route, snmp-server, aaa, line, banner, hostname, version
+/// - Juniper: system, interfaces, routing-options, protocols, security, policy-options, set
+static SECTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:!?\s*)?(interface|router|vlan|ip route|snmp-server|aaa|line|banner|hostname|version|system|interfaces|routing-options|protocols|security|policy-options|set )\s*(.*)$"
+    ).expect("SECTION_REGEX is a valid constant pattern")
+});
 
 // ============================================================================
 // Pagination Constants (FR31)
@@ -409,24 +429,16 @@ impl ConfigSummary {
 /// assert!(summary.sections.iter().any(|s| s.starts_with("router")));
 /// ```
 pub fn extract_config_summary(config: &str) -> ConfigSummary {
-    use regex::Regex;
     use std::collections::HashSet;
 
     let lines: Vec<&str> = config.lines().collect();
     let total_lines = lines.len();
 
-    // Regex patterns for common sections
-    // Cisco: interface, router, vlan, ip route, snmp-server, aaa, line, banner, hostname, version
-    // Juniper: system, interfaces, routing-options, protocols, security, policy-options, set
-    let section_pattern = Regex::new(
-        r"^(?:!?\s*)?(interface|router|vlan|ip route|snmp-server|aaa|line|banner|hostname|version|system|interfaces|routing-options|protocols|security|policy-options|set )\s*(.*)$"
-    ).expect("Valid regex");
-
     let mut sections = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     for line in &lines {
-        if let Some(caps) = section_pattern.captures(line) {
+        if let Some(caps) = SECTION_REGEX.captures(line) {
             let section_type = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let section_name = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let key = format!("{} {}", section_type, section_name)

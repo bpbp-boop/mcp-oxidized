@@ -39,7 +39,7 @@ fn create_mock_client(mock_uri: &str) -> OxidizedClient {
         ssl_verify: true,
         custom_headers: vec![],
     };
-    OxidizedClient::new(&config)
+    OxidizedClient::try_new(&config).expect("Failed to create OxidizedClient")
 }
 
 // =============================================================================

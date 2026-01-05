@@ -336,7 +336,14 @@ pub async fn search_configs(
         let node = node_name.clone();
 
         join_set.spawn(async move {
-            let _permit = sem.acquire().await.expect("Semaphore closed unexpectedly");
+            // Acquire semaphore permit - if closed, skip this node gracefully
+            let Ok(_permit) = sem.acquire().await else {
+                tracing::warn!(node = %node, "Semaphore closed, skipping node");
+                return (node, Err(crate::error::OxidizedError::HttpError {
+                    status_code: 503,
+                    context: "Semaphore closed during search".to_string(),
+                }));
+            };
             let config_result = backend.get_node_config(&node).await;
             (node, config_result)
         });
