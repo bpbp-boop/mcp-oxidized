@@ -31,8 +31,11 @@ use moka::future::Cache;
 use regex::Regex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tracing::instrument;
 
 use crate::config::Config;
@@ -316,17 +319,56 @@ impl Stats {
 pub struct CacheMetadata {
     /// True if the response was served from cache
     pub cache_hit: bool,
+    /// True when the response was fetched from Oxidized for this request.
+    pub fresh: bool,
+}
+
+/// Result of Oxidized's optional server-side configuration prefilter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfSearchResult {
+    /// The endpoint was available. The list may legitimately be empty.
+    Available(Vec<String>),
+    /// The endpoint could not be used; callers should fall back to full search.
+    Unavailable(String),
+}
+
+impl Default for ConfSearchResult {
+    fn default() -> Self {
+        Self::Unavailable("prefilter request failed".to_string())
+    }
+}
+
+impl ConfSearchResult {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Available(nodes) => nodes.is_empty(),
+            Self::Unavailable(_) => true,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Available(nodes) => nodes.len(),
+            Self::Unavailable(_) => 0,
+        }
+    }
 }
 
 impl CacheMetadata {
     /// Create metadata for a cache hit.
     pub fn hit() -> Self {
-        Self { cache_hit: true }
+        Self {
+            cache_hit: true,
+            fresh: false,
+        }
     }
 
     /// Create metadata for a cache miss.
     pub fn miss() -> Self {
-        Self { cache_hit: false }
+        Self {
+            cache_hit: false,
+            fresh: true,
+        }
     }
 }
 
@@ -404,6 +446,11 @@ pub struct CachedStats {
 /// ```
 #[async_trait]
 pub trait OxidizedBackend: Send + Sync {
+    /// Whether configuration-bearing output must be redacted.
+    fn redaction_enabled(&self) -> bool {
+        true
+    }
+
     /// Retrieve all nodes from Oxidized inventory.
     ///
     /// Returns the complete list of managed network devices with cache metadata (FR32).
@@ -540,7 +587,7 @@ pub trait OxidizedBackend: Send + Sync {
     /// # Returns
     ///
     /// A list of node names whose configurations contain the pattern.
-    async fn conf_search(&self, pattern: &str) -> Result<Vec<String>, OxidizedError>;
+    async fn conf_search(&self, pattern: &str) -> Result<ConfSearchResult, OxidizedError>;
 }
 
 // ============================================================================
@@ -599,6 +646,8 @@ pub struct OxidizedClient {
     config_cache: Cache<String, String>,
     stats_cache: Cache<(), Stats>,
     node_cache: Cache<String, Node>,
+    pending_backups: Arc<RwLock<HashSet<String>>>,
+    redact_secrets: bool,
 }
 
 impl OxidizedClient {
@@ -665,7 +714,42 @@ impl OxidizedClient {
             config_cache,
             stats_cache,
             node_cache,
+            pending_backups: Arc::new(RwLock::new(HashSet::new())),
+            redact_secrets: std::env::var("OXIDIZED_REDACT_SECRETS")
+                .map(|value| !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true),
         })
+    }
+
+    /// Mark a node as having an in-flight backup. Pending nodes bypass config
+    /// caching so an early read cannot poison the cache with stale content.
+    pub async fn set_backup_pending(&self, name: &str, pending: bool) {
+        let mut nodes = self.pending_backups.write().await;
+        if pending {
+            nodes.insert(name.to_string());
+            self.config_cache.invalidate(name).await;
+        } else {
+            nodes.remove(name);
+        }
+    }
+
+    pub async fn is_backup_pending(&self, name: &str) -> bool {
+        self.pending_backups.read().await.contains(name)
+    }
+
+    /// Fetch node state without consulting or updating the per-node cache.
+    pub async fn get_node_fresh(&self, name: &str) -> Result<Node, OxidizedError> {
+        let endpoint = format!("/node/show/{}.json", urlencoding::encode(name));
+        self.execute_with_retry(|| async {
+            let response = self.build_request(&endpoint).send().await;
+            self.handle_json_response(response, name).await
+        })
+        .await
+    }
+
+    /// Force the next configuration read to go to Oxidized.
+    pub async fn invalidate_config(&self, name: &str) {
+        self.config_cache.invalidate(name).await;
     }
 
     /// Create a new OxidizedClient from configuration (convenience wrapper).
@@ -1068,6 +1152,10 @@ impl OxidizedClient {
 
 #[async_trait]
 impl OxidizedBackend for OxidizedClient {
+    fn redaction_enabled(&self) -> bool {
+        self.redact_secrets
+    }
+
     #[instrument(skip(self), fields(url = %self.base_url))]
     async fn get_nodes(&self) -> Result<(Vec<Node>, CacheMetadata), OxidizedError> {
         // Check cache first
@@ -1125,7 +1213,8 @@ impl OxidizedBackend for OxidizedClient {
     #[instrument(skip(self), fields(url = %self.base_url, node = %name))]
     async fn get_node_config(&self, name: &str) -> Result<(String, CacheMetadata), OxidizedError> {
         // Check cache first
-        if let Some(cached) = self.config_cache.get(name).await {
+        let pending = self.is_backup_pending(name).await;
+        if !pending && let Some(cached) = self.config_cache.get(name).await {
             tracing::debug!(node = %name, "Cache hit for config");
             return Ok((cached, CacheMetadata::hit()));
         }
@@ -1144,9 +1233,11 @@ impl OxidizedBackend for OxidizedClient {
             .await?;
 
         // Store in cache
-        self.config_cache
-            .insert(name.to_string(), config.clone())
-            .await;
+        if !pending {
+            self.config_cache
+                .insert(name.to_string(), config.clone())
+                .await;
+        }
         Ok((config, CacheMetadata::miss()))
     }
 
@@ -1272,11 +1363,11 @@ impl OxidizedBackend for OxidizedClient {
     }
 
     #[instrument(skip(self), fields(url = %self.base_url))]
-    async fn conf_search(&self, pattern: &str) -> Result<Vec<String>, OxidizedError> {
+    async fn conf_search(&self, pattern: &str) -> Result<ConfSearchResult, OxidizedError> {
         // Early return for empty pattern - no point in network request
         if pattern.is_empty() {
             tracing::debug!("Empty pattern, skipping conf_search");
-            return Ok(vec![]);
+            return Ok(ConfSearchResult::Available(vec![]));
         }
 
         // NOTE: No execute_with_retry() here by design.
@@ -1299,19 +1390,22 @@ impl OxidizedBackend for OxidizedClient {
                         status = %resp.status(),
                         "conf_search API returned non-success status, falling back"
                     );
-                    return Ok(vec![]);
+                    return Ok(ConfSearchResult::Unavailable(format!(
+                        "HTTP {}",
+                        resp.status()
+                    )));
                 }
                 match resp.text().await {
                     Ok(text) => text,
                     Err(e) => {
                         tracing::debug!(error = %e, "Failed to read conf_search response body");
-                        return Ok(vec![]);
+                        return Ok(ConfSearchResult::Unavailable(e.to_string()));
                     }
                 }
             }
             Err(e) => {
                 tracing::debug!(error = %e, "conf_search API unavailable, falling back");
-                return Ok(vec![]);
+                return Ok(ConfSearchResult::Unavailable(e.to_string()));
             }
         };
 
@@ -1324,7 +1418,7 @@ impl OxidizedBackend for OxidizedClient {
             "conf_search completed"
         );
 
-        Ok(nodes)
+        Ok(ConfSearchResult::Available(nodes))
     }
 }
 
