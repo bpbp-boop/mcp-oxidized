@@ -162,6 +162,11 @@ async fn test_get_node_config_returns_text() {
             !config.is_empty(),
             "Configuration should not be empty for a successful node"
         );
+        assert_ne!(
+            config.trim(),
+            "node not found",
+            "Grouped node configuration must be fetched using its full path"
+        );
 
         // First call should be cache miss
         assert!(!metadata.cache_hit, "First call should be cache miss");

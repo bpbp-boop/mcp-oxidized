@@ -82,6 +82,15 @@ pub const RETRY_DELAYS_MS: [u64; 2] = [200, 800];
 static TD_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<td>([^<]+)</td>").expect("TD_REGEX is a valid pattern"));
 
+/// URL-encode each component of an Oxidized full node name while preserving
+/// `/` separators used by grouped nodes.
+fn encode_path_segments(path: &str) -> String {
+    path.split('/')
+        .map(urlencoding::encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 // ============================================================================
 // Data Models
 // ============================================================================
@@ -962,9 +971,16 @@ impl OxidizedClient {
     /// Oxidized 0.35.0 returns HTTP 500 with different formats depending on the Accept header:
     /// - Without Accept: text/plain with "unable to find 'nodename'"
     /// - With Accept: application/json: HTML page with "Oxidized::NodeNotFound at /path"
+    /// - Git output lookup failures: HTTP 200 with the literal body "node not found"
     ///
-    /// This function detects both patterns.
+    /// This function detects all known patterns.
     fn check_node_not_found_body(&self, body: &str, context: &str) -> Option<OxidizedError> {
+        // Pattern 0: Git output returns this sentinel with HTTP 200 when the
+        // requested repository path does not exist.
+        if body.trim() == "node not found" {
+            return Some(OxidizedError::NodeNotFound(context.to_string(), vec![]));
+        }
+
         // Pattern 1: Plain text format "unable to find 'nodename'"
         if body.contains("unable to find '") {
             let node_name = body
@@ -1069,6 +1085,15 @@ impl OxidizedBackend for OxidizedClient {
             })
             .await?;
 
+        // Hydrate the per-node cache while we already have the complete node
+        // records. This avoids one /node/show request per device when a config
+        // search immediately follows a node-list request.
+        for node in &nodes {
+            self.node_cache
+                .insert(node.name.clone(), node.clone())
+                .await;
+        }
+
         // Store in cache
         self.nodes_cache.insert((), nodes.clone()).await;
         Ok((nodes, CacheMetadata::miss()))
@@ -1107,7 +1132,10 @@ impl OxidizedBackend for OxidizedClient {
 
         // Cache miss - fetch with retry
         tracing::debug!(node = %name, "Cache miss for config, fetching from API");
-        let endpoint = format!("/node/fetch/{}", urlencoding::encode(name));
+        // Grouped nodes in a single Git repository are stored at
+        // <group>/<name>. Oxidized exposes that path as full_name.
+        let (node, _) = self.get_node(name).await?;
+        let endpoint = format!("/node/fetch/{}", encode_path_segments(&node.full_name));
         let config = self
             .execute_with_retry(|| async {
                 let response = self.build_request(&endpoint).send().await;
@@ -1647,6 +1675,24 @@ mod tests {
         let result = client.check_node_not_found_body(body, "context");
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_node_not_found_body_git_output_sentinel() {
+        let config = Config {
+            oxidized_url: "http://localhost:8888".to_string(),
+            oxidized_user: None,
+            oxidized_password: None,
+            ssl_verify: true,
+            custom_headers: vec![],
+        };
+        let client = OxidizedClient::new(&config);
+
+        let result = client.check_node_not_found_body("node not found\n", "test-node");
+        assert!(matches!(
+            result,
+            Some(OxidizedError::NodeNotFound(name, _)) if name == "test-node"
+        ));
     }
 
     #[test]
@@ -2880,6 +2926,13 @@ mod tests {
         let name = "switch-core-01";
         let encoded = urlencoding::encode(name);
         assert_eq!(encoded, "switch-core-01");
+    }
+
+    #[test]
+    fn test_encode_path_segments_preserves_group_separator() {
+        let full_name = "core switches/router 1";
+        let encoded = encode_path_segments(full_name);
+        assert_eq!(encoded, "core%20switches/router%201");
     }
 
     #[test]

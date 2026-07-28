@@ -172,10 +172,16 @@ impl MockOxidizedServer {
             .await;
     }
 
-    /// Mount GET /node/fetch/{name} - get current config (no .json extension)
+    /// Mount GET /node/fetch/{group}/{name} - get current config (no .json extension)
     async fn mount_node_config_endpoints(&self) {
         for (node_name, config) in &self.configs {
-            let path_str = format!("/node/fetch/{}", node_name);
+            let full_name = self
+                .nodes
+                .iter()
+                .find(|node| &node.name == node_name)
+                .map(|node| node.full_name.as_str())
+                .unwrap_or(node_name);
+            let path_str = format!("/node/fetch/{}", full_name);
             // Oxidized returns raw text, not JSON
             Mock::given(method("GET"))
                 .and(path(&path_str))
@@ -189,17 +195,22 @@ impl MockOxidizedServer {
         }
 
         // Catch-all for unknown nodes returns 500 (same as show)
-        let known_nodes: Vec<String> = self.configs.keys().cloned().collect();
+        let known_nodes: Vec<String> = self
+            .nodes
+            .iter()
+            .filter(|node| self.configs.contains_key(&node.name))
+            .map(|node| node.full_name.clone())
+            .collect();
         Mock::given(method("GET"))
-            .and(path_regex(r"^/node/fetch/[^/]+$"))
+            .and(path_regex(r"^/node/fetch/.+$"))
             .respond_with(move |req: &wiremock::Request| {
                 let path = req.url.path();
-                let name = path.strip_prefix("/node/fetch/").unwrap_or("unknown");
+                let full_name = path.strip_prefix("/node/fetch/").unwrap_or("unknown");
 
-                if known_nodes.contains(&name.to_string()) {
+                if known_nodes.contains(&full_name.to_string()) {
                     ResponseTemplate::new(200)
                 } else {
-                    let error_body = format!("unable to find '{}'", name);
+                    let error_body = format!("unable to find '{}'", full_name);
                     ResponseTemplate::new(500).set_body_string(error_body)
                 }
             })
